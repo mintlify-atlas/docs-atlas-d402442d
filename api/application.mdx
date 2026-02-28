@@ -240,6 +240,40 @@ type ErrStartupTaskFailed struct {
 
 Returned when a startup task with `AbortOnError: true` fails.
 
+## Helpers
+
+### HealthCheckHandler
+
+An HTTP handler that serves application health information as JSON.
+
+```go
+type HealthCheckHandler struct {
+    app *Application
+}
+```
+
+<ParamField path="NewHealthCheckHandler(app)" type="*HealthCheckHandler">
+  Creates a health check HTTP handler for the application.
+  
+  **Parameters:**
+  - `app` (*Application): The application instance to check health for
+  
+  ```go
+  app := application.New()
+  healthHandler := application.NewHealthCheckHandler(app)
+  
+  api := httpserver.New("8080", 3*time.Second)
+  api.Handle("/health", healthHandler)
+  ```
+</ParamField>
+
+The handler returns a JSON response with:
+- Application start time
+- Service statuses (NOT_STARTED, STARTED, ERROR)
+- Service start/stop times
+- Error messages for failed services
+- Custom health data from Healthchecker implementations
+
 ## Example Usage
 
 ```go

@@ -177,6 +177,58 @@ func (f MiddlewareFunc) Wrap(h http.Handler) http.Handler {
 }
 ```
 
+## Built-in Middleware
+
+### RecoverMiddleware
+
+The `RecoverMiddleware` catches panics in HTTP handlers and returns an HTTP 500 response.
+
+```go
+type RecoverMiddleware struct{}
+```
+
+<ParamField path="NewRecoverMiddleware()" type="*RecoverMiddleware">
+  Creates a new RecoverMiddleware instance.
+  
+  ```go
+  server := httpserver.New("8080", 3*time.Second)
+  server.Use(httpserver.NewRecoverMiddleware())
+  ```
+</ParamField>
+
+The middleware will:
+- Catch any panic in downstream handlers
+- Log the panic with request context
+- Return HTTP 500 Internal Server Error response
+- Prevent the server from crashing
+
+## FileServer Type
+
+The `FileServer` serves static files from an embedded file system.
+
+```go
+type FileServer struct {
+    server *HTTPServer
+}
+```
+
+<ParamField path="NewFileServer(fs, basePath, port)" type="*FileServer">
+  Creates a new FileServer for serving static files.
+  
+  **Parameters:**
+  - `fs` (fs.FS): The file system to serve (can be embedded)
+  - `basePath` (string): The URL path prefix (e.g., "/static")
+  - `port` (string): The port to listen on
+  
+  ```go
+  //go:embed static
+  var staticFiles embed.FS
+  
+  fileServer := httpserver.NewFileServer(staticFiles, "/static", "8080")
+  app.RegisterService("static", fileServer)
+  ```
+</ParamField>
+
 ## Example Usage
 
 ### Basic HTTP Server
