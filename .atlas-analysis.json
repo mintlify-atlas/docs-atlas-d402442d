@@ -1,0 +1,99 @@
+{
+  "projectType": "framework",
+  "projectName": "Platforma",
+  "projectDescription": "Backend application framework for Golang with domain-driven architecture",
+  "theme": "aspen",
+  "primaryColor": "#00ADD8",
+  "lightColor": null,
+  "darkColor": null,
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/architecture",
+              "concepts/application-lifecycle",
+              "concepts/domains",
+              "concepts/http-routing",
+              "concepts/middleware"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/database-migrations",
+              "guides/background-jobs",
+              "guides/scheduled-tasks",
+              "guides/authentication",
+              "guides/sessions",
+              "guides/logging"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core Packages",
+            "pages": [
+              "api/application",
+              "api/httpserver",
+              "api/database",
+              "api/queue",
+              "api/scheduler",
+              "api/log"
+            ]
+          },
+          {
+            "group": "Domain Modules",
+            "pages": [
+              "api/auth",
+              "api/session"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Domain-driven architecture with Repository/Service patterns",
+    "HTTP server with middleware and routing support",
+    "Database migrations for PostgreSQL",
+    "Background job processing with worker pools",
+    "Cron-based scheduled task execution",
+    "Built-in authentication and session management",
+    "Structured logging with context propagation",
+    "Application lifecycle management with graceful shutdown"
+  ],
+  "publicApiSurface": [
+    "application.Application",
+    "application.Domain",
+    "application.Runner",
+    "httpserver.HTTPServer",
+    "httpserver.HandlerGroup",
+    "httpserver.Middleware",
+    "database.Database",
+    "database.Migration",
+    "queue.Processor",
+    "queue.Handler",
+    "queue.Provider",
+    "scheduler.Scheduler",
+    "auth.Domain",
+    "auth.Service",
+    "auth.Repository",
+    "session.Domain",
+    "log.Logger"
+  ]
+}
