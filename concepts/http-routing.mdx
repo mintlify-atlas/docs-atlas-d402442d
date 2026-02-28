@@ -1,0 +1,440 @@
+---
+title: HTTP Routing
+description: Define HTTP routes and organize APIs with HTTPServer and HandlerGroup
+---
+
+Platforma's HTTP routing is built on Go's `http.ServeMux` with enhanced support for middleware, route grouping, and domain organization.
+
+## HTTPServer
+
+The `HTTPServer` type from `httpserver/httpserver.go:18` is a service that runs an HTTP server with graceful shutdown:
+
+```go
+type HTTPServer struct {
+    *HandlerGroup
+    port            string
+    shutdownTimeout time.Duration
+}
+```
+
+### Creating an HTTP Server
+
+From `httpserver/httpserver.go:25`:
+
+```go
+import (
+    "time"
+    "github.com/platforma-dev/platforma/httpserver"
+)
+
+// Create server on port 8080 with 5 second shutdown timeout
+api := httpserver.New("8080", 5*time.Second)
+```
+
+<Info>
+The shutdown timeout controls how long the server waits for in-flight requests to complete during graceful shutdown.
+</Info>
+
+### Registering with Application
+
+HTTP servers implement the `Runner` interface and can be registered as services:
+
+```go
+app := application.New()
+app.RegisterService("api", api)
+```
+
+The server starts when you run `./myapp run` and shuts down gracefully on interrupt signals.
+
+## Route Registration
+
+### Handle() - Register Handlers
+
+Use the `Handle()` method from `httpserver/handlergroup.go:31` with Go 1.22+ routing syntax:
+
+```go
+api.Handle("GET /users", getUsersHandler)
+api.Handle("POST /users", createUserHandler)
+api.Handle("GET /users/{id}", getUserHandler)
+api.Handle("PUT /users/{id}", updateUserHandler)
+api.Handle("DELETE /users/{id}", deleteUserHandler)
+```
+
+<Tip>
+The pattern `"METHOD /path"` syntax requires **Go 1.22 or later**. This gives you method-specific routing without external libraries.
+</Tip>
+
+### HandleFunc() - Register Functions
+
+From `httpserver/handlergroup.go:36`, for simple function handlers:
+
+```go
+api.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
+    w.Write([]byte("pong"))
+})
+```
+
+### Path Parameters
+
+Extract path parameters using Go's standard library:
+
+```go
+api.HandleFunc("GET /users/{id}", func(w http.ResponseWriter, r *http.Request) {
+    userID := r.PathValue("id")
+    
+    // Use userID...
+    w.Write([]byte("User ID: " + userID))
+})
+```
+
+## HandlerGroup
+
+The `HandlerGroup` type from `httpserver/handlergroup.go:8` organizes routes that share common middleware:
+
+```go
+type HandlerGroup struct {
+    mux         *http.ServeMux
+    middlewares []Middleware
+}
+```
+
+### Creating Handler Groups
+
+From `httpserver/handlergroup.go:14`:
+
+```go
+// Create a new handler group
+adminAPI := httpserver.NewHandlerGroup()
+
+// Add routes
+adminAPI.Handle("GET /stats", getStatsHandler)
+adminAPI.Handle("POST /config", updateConfigHandler)
+
+// Apply middleware to all routes in this group
+adminAPI.Use(adminAuthMiddleware)
+adminAPI.Use(auditLogMiddleware)
+```
+
+### Mounting Handler Groups
+
+Use `HandleGroup()` from `httpserver/handlergroup.go:41` to mount groups at a path prefix:
+
+```go
+// Mount admin API under /admin
+api.HandleGroup("/admin", adminAPI)
+
+// Now accessible as:
+// GET  /admin/stats
+// POST /admin/config
+```
+
+<Warning>
+`HandleGroup()` automatically strips the prefix before routing. Routes in the group should be defined **without** the mount prefix.
+</Warning>
+
+## Complete Example
+
+From `demo-app/cmd/api/main.go:13`, showing server setup with groups:
+
+```go
+package main
+
+import (
+    "context"
+    "net/http"
+    "time"
+
+    "github.com/platforma-dev/platforma/application"
+    "github.com/platforma-dev/platforma/httpserver"
+    "github.com/platforma-dev/platforma/log"
+)
+
+func main() {
+    ctx := context.Background()
+    app := application.New()
+
+    // Create HTTP server
+    api := httpserver.New("8080", 3*time.Second)
+
+    // Add top-level endpoints
+    api.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
+        w.Write([]byte("pong"))
+    })
+
+    api.HandleFunc("/long", func(w http.ResponseWriter, r *http.Request) {
+        time.Sleep(10 * time.Second)
+        w.Write([]byte("pong"))
+    })
+
+    // Add middleware to entire server
+    api.Use(log.NewTraceIDMiddleware(nil, ""))
+
+    // Create handler group
+    subApiGroup := httpserver.NewHandlerGroup()
+
+    // Add endpoint to group
+    subApiGroup.HandleFunc("/clock", func(w http.ResponseWriter, r *http.Request) {
+        w.Write([]byte(time.Now().String()))
+    })
+
+    // Add middleware to group only
+    subApiGroup.UseFunc(func(h http.Handler) http.Handler {
+        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            log.InfoContext(r.Context(), "incoming request", "addr", r.RemoteAddr)
+            h.ServeHTTP(w, r)
+        })
+    })
+
+    // Mount group at /subApi
+    api.HandleGroup("/subApi", subApiGroup)
+
+    // Register server
+    app.RegisterService("api", api)
+
+    // Run application
+    if err := app.Run(ctx); err != nil {
+        log.ErrorContext(ctx, "app finished with error", "error", err)
+    }
+}
+```
+
+This creates:
+- `GET /ping` - Top-level endpoint with trace ID middleware
+- `GET /long` - Top-level endpoint (tests graceful shutdown)
+- `GET /subApi/clock` - Group endpoint with both trace ID and logging middleware
+
+## Mounting Domain APIs
+
+Domains expose their HTTP API via a `HandlerGroup`:
+
+```go
+// From auth/domain.go:30
+authAPI := httpserver.NewHandlerGroup()
+authAPI.Handle("POST /register", registerHandler)
+authAPI.Handle("POST /login", loginHandler)
+authAPI.Handle("POST /logout", logoutHandler)
+authAPI.Handle("GET /me", getUserHandler)
+authAPI.Handle("POST /change-password", changePasswordHandler)
+authAPI.Handle("DELETE /me", deleteHandler)
+```
+
+Mount it in your main application:
+
+```go
+api := httpserver.New("8080", 5*time.Second)
+api.HandleGroup("/auth", authDomain.HandleGroup)
+app.RegisterService("api", api)
+```
+
+<Check>
+This pattern keeps domain routing logic **inside the domain** while giving you flexibility in how you expose it.
+</Check>
+
+## Middleware Application
+
+### Server-Level Middleware
+
+Applies to all routes on the server:
+
+```go
+api := httpserver.New("8080", 5*time.Second)
+api.Use(log.NewTraceIDMiddleware(nil, ""))
+api.Use(corsMiddleware)
+```
+
+### Group-Level Middleware
+
+Applies only to routes in the group from `httpserver/handlergroup.go:19`:
+
+```go
+protectedAPI := httpserver.NewHandlerGroup()
+protectedAPI.Use(authMiddleware)  // Only affects this group
+protectedAPI.Handle("GET /profile", getProfileHandler)
+
+api.HandleGroup("/user", protectedAPI)
+```
+
+### UseFunc() - Inline Middleware
+
+From `httpserver/handlergroup.go:24`, add middleware as a function:
+
+```go
+group.UseFunc(func(h http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        // Before request
+        log.InfoContext(r.Context(), "request started")
+        
+        h.ServeHTTP(w, r)
+        
+        // After request
+        log.InfoContext(r.Context(), "request completed")
+    })
+})
+```
+
+## Middleware Ordering
+
+Middleware is applied in **reverse order** from `httpserver/middleware.go:26`:
+
+```go
+// Applied as: traceID -> logging -> auth -> handler
+api.Use(traceIDMiddleware)   // Outermost
+api.Use(loggingMiddleware)
+api.Use(authMiddleware)      // Innermost
+```
+
+<Warning>
+The **first registered** middleware is the **outermost** wrapper. Request flow: trace ID → logging → auth → handler. Response flow is reversed.
+</Warning>
+
+## Route Organization Patterns
+
+### Pattern 1: Versioned APIs
+
+```go
+v1 := httpserver.NewHandlerGroup()
+v1.Handle("GET /users", v1GetUsersHandler)
+v1.Handle("POST /users", v1CreateUserHandler)
+
+v2 := httpserver.NewHandlerGroup()
+v2.Handle("GET /users", v2GetUsersHandler)
+v2.Handle("POST /users", v2CreateUserHandler)
+
+api.HandleGroup("/v1", v1)
+api.HandleGroup("/v2", v2)
+```
+
+### Pattern 2: Public vs Protected
+
+```go
+publicAPI := httpserver.NewHandlerGroup()
+publicAPI.Handle("GET /health", healthHandler)
+publicAPI.Handle("POST /webhooks/stripe", stripeWebhookHandler)
+
+protectedAPI := httpserver.NewHandlerGroup()
+protectedAPI.Use(authMiddleware)
+protectedAPI.Handle("GET /profile", profileHandler)
+protectedAPI.Handle("POST /upload", uploadHandler)
+
+api.HandleGroup("/public", publicAPI)
+api.HandleGroup("/api", protectedAPI)
+```
+
+### Pattern 3: Domain-Based
+
+```go
+userDomain := user.New(db)
+orderDomain := order.New(db)
+productDomain := product.New(db)
+
+api := httpserver.New("8080", 5*time.Second)
+api.HandleGroup("/users", userDomain.HandleGroup)
+api.HandleGroup("/orders", orderDomain.HandleGroup)
+api.HandleGroup("/products", productDomain.HandleGroup)
+```
+
+## Graceful Shutdown
+
+From `httpserver/httpserver.go:30`, the server handles shutdown automatically:
+
+```go
+func (s *HTTPServer) Run(ctx context.Context) error {
+    server := &http.Server{
+        Addr:              ":" + s.port,
+        Handler:           wrapHandlerInMiddleware(s.mux, s.middlewares),
+        ReadHeaderTimeout: 1 * time.Second,
+    }
+
+    go func() {
+        log.InfoContext(ctx, "starting http server", "address", server.Addr)
+        if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+            log.ErrorContext(ctx, "HTTP server error", "error", err)
+        }
+    }()
+
+    <-ctx.Done()  // Wait for shutdown signal
+
+    shutdownCtx, cancel := context.WithTimeout(
+        context.Background(), 
+        s.shutdownTimeout,
+    )
+    defer cancel()
+
+    if err := server.Shutdown(shutdownCtx); err != nil {
+        return fmt.Errorf("failed to gracefully shutdown: %w", err)
+    }
+    
+    log.InfoContext(ctx, "graceful shutdown completed")
+    return nil
+}
+```
+
+<Check>
+In-flight requests have `shutdownTimeout` duration to complete before the server force-closes connections.
+</Check>
+
+## Health Checks
+
+The `HTTPServer` implements `Healthchecker` from `httpserver/httpserver.go:62`:
+
+```go
+func (s *HTTPServer) Healthcheck(_ context.Context) any {
+    return map[string]any{
+        "port": s.port,
+    }
+}
+```
+
+This is automatically included when you register the server:
+
+```go
+app.RegisterService("api", api)
+health := app.Health(ctx)
+// health.Services["api"] contains port information
+```
+
+## Advanced Routing
+
+### Wildcard Paths
+
+```go
+// Match anything under /static/
+api.Handle("/static/", http.StripPrefix("/static/", 
+    http.FileServer(http.Dir("./static"))))
+```
+
+### Method-Specific Routing
+
+```go
+// Same path, different methods
+api.Handle("GET /items/{id}", getItemHandler)
+api.Handle("PUT /items/{id}", updateItemHandler)
+api.Handle("DELETE /items/{id}", deleteItemHandler)
+```
+
+### Multiple Path Params
+
+```go
+api.HandleFunc("GET /users/{userID}/posts/{postID}", 
+    func(w http.ResponseWriter, r *http.Request) {
+        userID := r.PathValue("userID")
+        postID := r.PathValue("postID")
+        
+        // Handle request...
+    },
+)
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Middleware" icon="filter" href="/concepts/middleware">
+    Learn how to create and apply HTTP middleware
+  </Card>
+  <Card title="Domains" icon="layer-group" href="/concepts/domains">
+    Organize routes by business domain
+  </Card>
+  <Card title="Application Lifecycle" icon="rotate" href="/concepts/application-lifecycle">
+    Register and run HTTP servers
+  </Card>
+</CardGroup>

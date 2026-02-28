@@ -1,0 +1,427 @@
+---
+title: Authentication
+description: Implement user authentication with session management and route protection in Platforma
+---
+
+Platforma's auth domain provides a complete authentication system with user management, password hashing, session handling, and HTTP middleware for route protection.
+
+## Overview
+
+The auth package includes:
+
+- User registration and login
+- Secure password hashing with bcrypt and salt
+- Session-based authentication
+- Middleware for protecting routes
+- Password change and account deletion
+- Context helpers for accessing the current user
+
+## Setting Up Authentication
+
+<Steps>
+  <Step title="Create database and session domains">
+    ```go
+    import (
+      "github.com/platforma-dev/platforma/database"
+      "github.com/platforma-dev/platforma/session"
+      "github.com/platforma-dev/platforma/auth"
+    )
+
+    db, err := database.New(connectionString)
+    if err != nil {
+      return err
+    }
+
+    sessionDomain := session.New(db.Connection())
+    db.RegisterRepository("session", sessionDomain.Repository)
+    ```
+  </Step>
+
+  <Step title="Create auth repository and service">
+    ```go
+    authRepo := auth.NewRepository(db.Connection())
+    db.RegisterRepository("auth", authRepo)
+
+    authService := auth.NewService(
+      authRepo,
+      sessionDomain.Service,
+      "session_id",        // Cookie name
+      nil,                 // Use default username validator
+      nil,                 // Use default password validator
+      nil,                 // No cleanup enqueuer
+    )
+    ```
+  </Step>
+
+  <Step title="Run migrations">
+    ```go
+    if err := db.Migrate(ctx); err != nil {
+      return fmt.Errorf("migration failed: %w", err)
+    }
+    ```
+  </Step>
+</Steps>
+
+## Service Methods
+
+The `auth.Service` provides methods for user management:
+
+### Register User
+
+```go
+err := authService.CreateWithLoginAndPassword(ctx, "alice", "secure123")
+if errors.Is(err, auth.ErrInvalidUsername) {
+  // Username validation failed
+}
+if errors.Is(err, auth.ErrInvalidPassword) {
+  // Password validation failed
+}
+```
+
+Default validation rules:
+- Username: 5-20 characters
+- Password: 8-100 characters
+
+### Login
+
+```go
+sessionID, err := authService.CreateSessionFromUsernameAndPassword(ctx, "alice", "secure123")
+if errors.Is(err, auth.ErrWrongUserOrPassword) {
+  // Invalid credentials
+}
+
+// Set session cookie
+http.SetCookie(w, &http.Cookie{
+  Name:     authService.CookieName(),
+  Value:    sessionID,
+  Path:     "/",
+  HttpOnly: true,
+  SameSite: http.SameSiteLaxMode,
+})
+```
+
+### Logout
+
+```go
+// Get session ID from cookie
+cookie, err := r.Cookie(authService.CookieName())
+if err != nil {
+  return err
+}
+
+err = authService.DeleteSession(ctx, cookie.Value)
+if err != nil {
+  return err
+}
+
+// Clear cookie
+http.SetCookie(w, &http.Cookie{
+  Name:   authService.CookieName(),
+  Value:  "",
+  MaxAge: -1,
+})
+```
+
+### Change Password
+
+```go
+// User must be in context (from middleware)
+err := authService.ChangePassword(ctx, "oldPassword", "newPassword")
+if errors.Is(err, auth.ErrCurrentPasswordIncorrect) {
+  // Current password is wrong
+}
+if errors.Is(err, auth.ErrInvalidPassword) {
+  // New password doesn't meet requirements
+}
+```
+
+### Delete Account
+
+```go
+// User must be in context (from middleware)
+err := authService.DeleteUser(ctx)
+if err != nil {
+  return err
+}
+// Sessions are automatically deleted
+```
+
+## Middleware for Route Protection
+
+The `AuthenticationMiddleware` validates sessions and injects the user into the request context:
+
+```go
+middleware := auth.NewAuthenticationMiddleware(authService)
+
+// Protect an entire handler group
+protectedAPI := httpserver.NewHandlerGroup()
+protectedAPI.Use(middleware)
+protectedAPI.Handle("/profile", profileHandler)
+protectedAPI.Handle("/settings", settingsHandler)
+
+// Or wrap a single handler
+protectedHandler := middleware.Wrap(myHandler)
+```
+
+The middleware:
+
+1. Reads the session cookie
+2. Validates the session
+3. Retrieves the user from the database
+4. Injects the user into the context
+5. Returns 401 if authentication fails
+
+## Accessing the Current User
+
+Use `auth.UserFromContext` to get the authenticated user:
+
+```go
+func profileHandler(w http.ResponseWriter, r *http.Request) {
+  user := auth.UserFromContext(r.Context())
+  if user == nil {
+    http.Error(w, "unauthorized", http.StatusUnauthorized)
+    return
+  }
+
+  // Use user data
+  fmt.Fprintf(w, "Hello, %s!", user.Username)
+}
+```
+
+The user is automatically injected by the authentication middleware.
+
+## HTTP Handlers
+
+The auth package includes built-in HTTP handlers:
+
+### Register Handler
+
+```go
+registerHandler := auth.NewRegisterHandler(authService)
+http.Handle("/auth/register", registerHandler)
+```
+
+Expects JSON:
+```json
+{
+  "login": "alice",
+  "password": "secure123"
+}
+```
+
+Returns:
+- `201 Created` on success
+- `400 Bad Request` if validation fails
+- `500 Internal Server Error` on database errors
+
+### Login Handler
+
+```go
+loginHandler := auth.NewLoginHandler(authService)
+http.Handle("/auth/login", loginHandler)
+```
+
+Expects JSON:
+```json
+{
+  "login": "alice",
+  "password": "secure123"
+}
+```
+
+Returns:
+- `200 OK` and sets session cookie on success
+- `401 Unauthorized` for invalid credentials
+
+### Other Handlers
+
+The package also provides:
+- `NewLogoutHandler` - Deletes session and clears cookie
+- `NewChangePasswordHandler` - Changes user password (requires auth)
+- `NewGetHandler` - Returns current user info (requires auth)
+- `NewDeleteHandler` - Deletes user account (requires auth)
+
+See `auth/handler_*.go` in the source code for implementation details.
+
+## Custom Validation
+
+Provide custom validators when creating the service:
+
+```go
+usernameValidator := func(username string) error {
+  if len(username) < 3 {
+    return errors.New("username too short")
+  }
+  if !regexp.MustCompile(`^[a-zA-Z0-9_]+$`).MatchString(username) {
+    return errors.New("username must be alphanumeric")
+  }
+  return nil
+}
+
+passwordValidator := func(password string) error {
+  if len(password) < 12 {
+    return errors.New("password must be at least 12 characters")
+  }
+  if !strings.ContainsAny(password, "0123456789") {
+    return errors.New("password must contain a number")
+  }
+  return nil
+}
+
+authService := auth.NewService(
+  authRepo,
+  sessionService,
+  "session_id",
+  usernameValidator,
+  passwordValidator,
+  nil,
+)
+```
+
+## Password Security
+
+Platforma uses bcrypt with salt for secure password storage:
+
+```go
+// Password hashing (done automatically)
+salt := uuid.New().String()
+hashedPassword, _ := bcrypt.GenerateFromPassword(
+  []byte(password+":"+salt),
+  bcrypt.DefaultCost,
+)
+
+// Password verification (done automatically)
+err := bcrypt.CompareHashAndPassword(
+  []byte(user.Password),
+  []byte(password+":"+user.Salt),
+)
+```
+
+Each user gets a unique salt, and passwords are never stored in plain text.
+
+## User Model
+
+The `User` struct represents a user:
+
+```go
+type User struct {
+  ID       string
+  Username string
+  Password string    // Bcrypt hash
+  Salt     string    // Unique salt
+  Created  time.Time
+  Updated  time.Time
+  Status   Status    // Active, Inactive, or Deleted
+}
+```
+
+## Error Types
+
+The auth package defines these error types:
+
+- `ErrUserNotFound` - User doesn't exist
+- `ErrInvalidUsername` - Username validation failed
+- `ErrInvalidPassword` - Password validation failed
+- `ErrWrongUserOrPassword` - Login failed
+- `ErrCurrentPasswordIncorrect` - Password change failed
+- `ErrShortUsername` / `ErrLongUsername` - Length validation
+- `ErrShortPassword` / `ErrLongPassword` - Length validation
+
+## Complete Example
+
+<CodeGroup>
+```go main.go
+package main
+
+import (
+	"context"
+	"net/http"
+	"github.com/platforma-dev/platforma/database"
+	"github.com/platforma-dev/platforma/session"
+	"github.com/platforma-dev/platforma/auth"
+	"github.com/platforma-dev/platforma/httpserver"
+)
+
+func main() {
+	ctx := context.Background()
+
+	// Setup database
+	db, _ := database.New("postgres://localhost/myapp")
+	sessionDomain := session.New(db.Connection())
+	db.RegisterRepository("session", sessionDomain.Repository)
+
+	// Setup auth
+	authRepo := auth.NewRepository(db.Connection())
+	db.RegisterRepository("auth", authRepo)
+	authService := auth.NewService(
+		authRepo,
+		sessionDomain.Service,
+		"session_id",
+		nil, nil, nil,
+	)
+
+	// Run migrations
+	db.Migrate(ctx)
+
+	// Setup HTTP handlers
+	mux := http.NewServeMux()
+	
+	// Public routes
+	mux.Handle("/auth/register", auth.NewRegisterHandler(authService))
+	mux.Handle("/auth/login", auth.NewLoginHandler(authService))
+
+	// Protected routes
+	middleware := auth.NewAuthenticationMiddleware(authService)
+	protected := httpserver.NewHandlerGroup()
+	protected.Use(middleware)
+	protected.Handle("/profile", profileHandler())
+	protected.Handle("/auth/logout", auth.NewLogoutHandler(authService))
+
+	http.ListenAndServe(":8080", mux)
+}
+
+func profileHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user := auth.UserFromContext(r.Context())
+		fmt.Fprintf(w, "Hello, %s!", user.Username)
+	})
+}
+```
+</CodeGroup>
+
+## Repository Interface
+
+The `Repository` implements the migrator interface and provides database operations:
+
+```go
+type Repository struct {
+  db db
+}
+
+func (r *Repository) Migrations() fs.FS {
+  m, _ := fs.Sub(migrations, "migrations")
+  return m
+}
+```
+
+Migrations are embedded from `auth/migrations/*.sql` and automatically applied when you call `db.Migrate(ctx)`.
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Use HTTPS" icon="lock">
+    Always serve your application over HTTPS to protect session cookies from interception.
+  </Card>
+
+  <Card title="Set cookie flags" icon="cookie">
+    Use `HttpOnly` and `SameSite` flags on session cookies to prevent XSS and CSRF attacks.
+  </Card>
+
+  <Card title="Validate on both sides" icon="shield-check">
+    Validate input on both client and server side for better UX and security.
+  </Card>
+
+  <Card title="Log auth events" icon="list">
+    Log login attempts, password changes, and account deletions for security auditing.
+  </Card>
+</CardGroup>

@@ -1,80 +1,458 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quick Start
+description: Build your first Platforma HTTP server in minutes with this hands-on tutorial.
 ---
 
-## Get started in three steps
+# Quick Start Guide
 
-Get your documentation site running locally and make your first customization.
-
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+This guide walks you through creating a fully functional HTTP server with Platforma. You'll learn the core concepts while building something you can immediately run and expand.
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+This tutorial assumes you've already [installed Platforma](/installation). If not, complete the installation first.
 </Note>
+
+## What You'll Build
+
+A simple HTTP API server with:
+- Multiple endpoints with different routes
+- Handler groups for organizing routes
+- Middleware for request logging and trace IDs
+- Graceful shutdown handling
+- Proper application lifecycle management
+
+<Steps>
+
+<Step title="Create Your Main File">
+
+Create a new file `cmd/api/main.go`:
+
+```bash
+mkdir -p cmd/api
+touch cmd/api/main.go
+```
+
+Add the basic imports and structure:
+
+```go main.go
+package main
+
+import (
+	"context"
+	"net/http"
+	"time"
+
+	"github.com/platforma-dev/platforma/application"
+	"github.com/platforma-dev/platforma/httpserver"
+	"github.com/platforma-dev/platforma/log"
+)
+
+func main() {
+	ctx := context.Background()
+
+	// We'll add code here in the next steps
+}
+```
+
+</Step>
+
+<Step title="Initialize the Application">
+
+Create a new Platforma application. This is the core container that manages your services:
+
+```go main.go
+func main() {
+	ctx := context.Background()
+
+	// Initialize new application
+	app := application.New()
+
+	// Services will be registered here
+}
+```
+
+The `Application` type handles:
+- Service lifecycle management
+- Graceful shutdown coordination
+- Health check aggregation
+- Startup task execution
+
+</Step>
+
+<Step title="Create an HTTP Server">
+
+Create an HTTP server with a specific port and shutdown timeout:
+
+```go main.go
+// Create HTTP server
+api := httpserver.New("8080", 3*time.Second)
+```
+
+The parameters are:
+- `"8080"` - The port to listen on
+- `3*time.Second` - Maximum time to wait for connections to close during shutdown
+
+<Tip>
+The shutdown timeout ensures graceful handling of in-flight requests. Adjust it based on your longest request duration.
+</Tip>
+
+</Step>
+
+<Step title="Add Your First Endpoint">
+
+Add a simple `/ping` endpoint that responds with "pong":
+
+```go main.go
+// Add /ping endpoint to `api`
+api.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
+	w.Write([]byte("pong"))
+})
+```
+
+This uses Go's standard `http.HandlerFunc` signature—Platforma works seamlessly with the standard library.
+
+</Step>
+
+<Step title="Add Middleware for Request Tracing">
+
+Add middleware to inject trace IDs into logs and response headers:
+
+```go main.go
+// Add middleware to HTTP server
+// It will add trace ID to logs and response headers
+api.Use(log.NewTraceIDMiddleware(nil, ""))
+```
+
+Trace IDs help you correlate logs from a single request across your application. They're automatically generated for each request and included in:
+- Log output (via `log.InfoContext`, `log.ErrorContext`, etc.)
+- Response headers (as `X-Trace-ID`)
+
+<Note>
+`NewTraceIDMiddleware` accepts:
+- First parameter: optional trace ID generator function (nil uses default UUID)
+- Second parameter: optional custom header name (empty string uses `X-Trace-ID`)
+</Note>
+
+</Step>
+
+<Step title="Create a Handler Group">
+
+Organize related endpoints into a handler group with shared middleware:
+
+```go main.go
+// Create handler group
+subApiGroup := httpserver.NewHandlerGroup()
+
+// Add /clock endpoint to handler group
+subApiGroup.HandleFunc("/clock", func(w http.ResponseWriter, r *http.Request) {
+	w.Write([]byte(time.Now().String()))
+})
+
+// Add middleware to handler group
+// It will log all incoming requests to this handle group
+subApiGroup.UseFunc(func(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.InfoContext(r.Context(), "incoming request", "addr", r.RemoteAddr)
+		h.ServeHTTP(w, r)
+	})
+})
+
+// Mount handler group to HTTP server with /subApi path prefix
+api.HandleGroup("/subApi", subApiGroup)
+```
+
+Now the `/clock` endpoint is accessible at `/subApi/clock`, and every request to that group logs the remote address.
+
+<Tip>
+Handler groups are perfect for:
+- API versioning (e.g., `/v1`, `/v2`)
+- Feature areas (e.g., `/admin`, `/public`)
+- Applying middleware to related routes
+</Tip>
+
+</Step>
+
+<Step title="Register the HTTP Server">
+
+Register your HTTP server with the application:
+
+```go main.go
+// Register HTTP server as application service
+app.RegisterService("api", api)
+```
+
+The first parameter (`"api"`) is the service name, used for:
+- Health check identification
+- Log messages
+- Service status tracking
+
+</Step>
+
+<Step title="Run the Application">
+
+Start the application with error handling:
+
+```go main.go
+// Run application
+if err := app.Run(ctx); err != nil {
+	log.ErrorContext(ctx, "app finished with error", "error", err)
+}
+```
+
+<Warning>
+Platforma applications use a command-based CLI. When running your app, you must specify the `run` command:
+```bash
+go run cmd/api/main.go run
+```
+Not just:
+```bash
+go run cmd/api/main.go
+```
+</Warning>
+
+</Step>
+
+<Step title="Test Your Server">
+
+Run your application:
+
+```bash
+go run cmd/api/main.go run
+```
+
+You should see log output like:
+
+```
+2026-02-28T10:30:45Z INFO starting application startupTasks=0
+2026-02-28T10:30:45Z INFO starting http server address=:8080
+```
+
+Test your endpoints:
+
+```bash
+# Test /ping
+curl http://localhost:8080/ping
+# Response: pong
+
+# Test /subApi/clock with verbose output to see trace ID header
+curl -v http://localhost:8080/subApi/clock
+# Response: 2026-02-28 10:31:22.123456 +0000 UTC
+# Headers include: X-Trace-ID: <uuid>
+```
+
+<Tip>
+You'll see request logs for the `/subApi/clock` endpoint because of the logging middleware we added to that handler group.
+</Tip>
+
+</Step>
+
+</Steps>
+
+## Complete Code
+
+Here's the complete working example:
+
+```go cmd/api/main.go
+package main
+
+import (
+	"context"
+	"net/http"
+	"time"
+
+	"github.com/platforma-dev/platforma/application"
+	"github.com/platforma-dev/platforma/httpserver"
+	"github.com/platforma-dev/platforma/log"
+)
+
+func main() {
+	ctx := context.Background()
+
+	// Initialize new application
+	app := application.New()
+
+	// Create HTTP server
+	api := httpserver.New("8080", 3*time.Second)
+
+	// Add /ping endpoint to `api`
+	api.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("pong"))
+	})
+
+	// Add middleware to HTTP server. It will add trace ID to logs and response headers
+	api.Use(log.NewTraceIDMiddleware(nil, ""))
+
+	// Create handler group
+	subApiGroup := httpserver.NewHandlerGroup()
+
+	// Add /clock endpoint to handler group
+	subApiGroup.HandleFunc("/clock", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(time.Now().String()))
+	})
+
+	// Add middleware to HTTP server. It will log all incoming requests to this handle group
+	subApiGroup.UseFunc(func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			log.InfoContext(r.Context(), "incoming request", "addr", r.RemoteAddr)
+			h.ServeHTTP(w, r)
+		})
+	})
+
+	// Add handle group to HTTP server with /subApi path
+	api.HandleGroup("/subApi", subApiGroup)
+
+	// Register HTTP server as application service
+	app.RegisterService("api", api)
+
+	// Run application
+	if err := app.Run(ctx); err != nil {
+		log.ErrorContext(ctx, "app finished with error", "error", err)
+	}
+
+	// Now you can access http://localhost:8080/ping, http://localhost:8080/long
+	// and http://localhost:8080/subApi/clock URLs with GET method
+}
+```
+
+<Note>
+This example is adapted from the real demo-app included in the Platforma repository at `demo-app/cmd/api/main.go`
+</Note>
+
+## Understanding What Happened
+
+Let's break down the key concepts:
+
+### Application Lifecycle
+
+The `Application` manages the entire lifecycle:
+
+1. **Registration**: You register services before running
+2. **Startup**: When you call `app.Run()`, it starts all registered services concurrently
+3. **Shutdown**: On interrupt signal (Ctrl+C), it gracefully shuts down all services
+
+### Service Interface
+
+Any type implementing the `Runner` interface can be registered as a service:
+
+```go
+type Runner interface {
+	Run(ctx context.Context) error
+}
+```
+
+The HTTP server, queue processors, and schedulers all implement this interface.
+
+### Graceful Shutdown
+
+When you press Ctrl+C:
+
+1. The context is canceled
+2. The HTTP server stops accepting new connections
+3. Existing connections have up to `shutdownTimeout` to complete
+4. The application exits cleanly
+
+### Middleware Pattern
+
+Middleware wraps handlers to add cross-cutting concerns:
+
+```go
+type Middleware interface {
+	Wrap(http.Handler) http.Handler
+}
+```
+
+Middleware can:
+- Log requests
+- Authenticate users
+- Add trace IDs
+- Recover from panics
+- Measure request duration
+
+## Next Steps
+
+Now that you have a working server, explore more features:
+
+<CardGroup cols={2}>
+  <Card title="Add a Database" icon="database">
+    Connect to PostgreSQL and run migrations
+  </Card>
+  <Card title="Create a Domain" icon="layer-group">
+    Build a complete domain with repository and service
+  </Card>
+  <Card title="Add Background Jobs" icon="gears">
+    Process async tasks with the queue processor
+  </Card>
+  <Card title="Schedule Tasks" icon="clock">
+    Run periodic jobs with the scheduler
+  </Card>
+</CardGroup>
+
+## Common Patterns
+
+### Adding More Endpoints
+
+```go
+// Simple handler
+api.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"ok"}`))
+})
+
+// With path parameters (Go 1.22+ pattern)
+api.HandleFunc("GET /users/{id}", func(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("id")
+	w.Write([]byte("User ID: " + userID))
+})
+```
+
+### Extracting Handlers
+
+```go
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"ok"}`))
+}
+
+api.HandleFunc("/health", healthHandler)
+```
+
+### Using Context Values
+
+```go
+api.HandleFunc("/context-demo", func(w http.ResponseWriter, r *http.Request) {
+	// Access trace ID from context
+	traceID, _ := r.Context().Value(log.TraceIDKey).(string)
+	log.InfoContext(r.Context(), "handling request", "traceID", traceID)
+	w.Write([]byte("Check logs for trace ID"))
+})
+```
+
+## Troubleshooting
+
+### Port Already in Use
+
+If port 8080 is busy:
+
+```go
+api := httpserver.New("8081", 3*time.Second)
+```
+
+### Missing Command
+
+If you see usage information instead of your server starting, remember to use:
+
+```bash
+go run cmd/api/main.go run
+#                        ^^^ command required
+```
+
+### Graceful Shutdown Not Working
+
+Increase the shutdown timeout if your requests take longer:
+
+```go
+api := httpserver.New("8080", 30*time.Second) // 30 seconds
+```
+
+<Card title="Learn More" icon="book" href="/concepts/architecture">
+  Dive deeper into domains, repositories, and architecture patterns
+</Card>

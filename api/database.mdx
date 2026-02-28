@@ -1,0 +1,314 @@
+---
+title: "Database"
+description: "PostgreSQL database connection and migration management"
+---
+
+The `database` package provides database connection management and migration functionality using PostgreSQL with sqlx.
+
+## Database Type
+
+The `Database` type represents a database connection with migration capabilities.
+
+```go
+type Database struct {
+    conn         *sqlx.DB
+    repositories map[string]any
+    migrators    map[string]migrator
+    service      *service
+}
+```
+
+### Constructor
+
+<ParamField path="New(connection)" type="(*Database, error)">
+  Creates a new Database instance with the given PostgreSQL connection string.
+  
+  **Parameters:**
+  - `connection` (string): PostgreSQL connection string
+  
+  **Connection string format:**
+  ```
+  postgres://user:password@host:port/database?sslmode=disable
+  ```
+  
+  **Example:**
+  ```go
+  db, err := database.New("postgres://user:pass@localhost:5432/mydb?sslmode=disable")
+  if err != nil {
+      log.Fatal(err)
+  }
+  ```
+</ParamField>
+
+## Methods
+
+### Connection
+
+<ParamField path="Connection()" type="*sqlx.DB">
+  Returns the underlying sqlx database connection for direct database operations.
+  
+  ```go
+  conn := db.Connection()
+  var count int
+  err := conn.Get(&count, "SELECT COUNT(*) FROM users")
+  ```
+</ParamField>
+
+### RegisterRepository
+
+<ParamField path="RegisterRepository(name string, repository any)" type="void">
+  Registers a repository with the database. If the repository implements the migrator interface, its migrations will be applied when `Migrate()` is called.
+  
+  **Parameters:**
+  - `name` (string): Repository identifier
+  - `repository` (any): Repository instance
+  
+  ```go
+  userRepo := NewUserRepository(db.Connection())
+  db.RegisterRepository("users", userRepo)
+  ```
+</ParamField>
+
+### Migrate
+
+<ParamField path="Migrate(ctx context.Context)" type="error">
+  Runs all pending migrations for registered repositories. Migrations are tracked in a `migrations` table and only run once.
+  
+  **Process:**
+  1. Creates the migrations tracking table if it doesn't exist
+  2. Retrieves completed migrations
+  3. Parses migrations from all registered repositories
+  4. Applies only pending migrations in order
+  
+  ```go
+  err := db.Migrate(ctx)
+  if err != nil {
+      log.ErrorContext(ctx, "migration failed", "error", err)
+  }
+  ```
+</ParamField>
+
+## Migration Type
+
+Represents a database migration with up and down SQL statements.
+
+```go
+type Migration struct {
+    ID         string
+    Up         string
+    Down       string
+    repository string
+}
+```
+
+<ResponseField name="ID" type="string">
+  Unique identifier for the migration, derived from the filename (without .sql extension) or overridden with `-- +migrate ID:` marker.
+</ResponseField>
+
+<ResponseField name="Up" type="string">
+  SQL statements to apply the migration.
+</ResponseField>
+
+<ResponseField name="Down" type="string">
+  SQL statements to revert the migration (optional).
+</ResponseField>
+
+## Migration File Format
+
+Migration files must:
+- Have a `.sql` extension
+- Contain a `-- +migrate Up` marker followed by SQL statements
+- Optionally contain a `-- +migrate Down` marker for rollback SQL
+- Be named in a sortable format (e.g., `001_create_users.sql`, `002_add_email.sql`)
+
+### Basic Migration Example
+
+```sql
+-- +migrate Up
+CREATE TABLE IF NOT EXISTS users (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    email TEXT UNIQUE NOT NULL
+);
+
+-- +migrate Down
+DROP TABLE users;
+```
+
+### Custom Migration ID
+
+You can override the migration ID using the `-- +migrate ID:` marker (must be the first marker):
+
+```sql
+-- +migrate ID: custom_migration_id
+-- +migrate Up
+CREATE TABLE products (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL
+);
+
+-- +migrate Down
+DROP TABLE products;
+```
+
+## Implementing Migrations in Repositories
+
+To enable migrations for a repository, implement the `Migrations()` method:
+
+```go
+import (
+    "embed"
+    "io/fs"
+    "github.com/jmoiron/sqlx"
+)
+
+//go:embed *.sql
+var migrations embed.FS
+
+type UserRepository struct {
+    db *sqlx.DB
+}
+
+func NewUserRepository(db *sqlx.DB) *UserRepository {
+    return &UserRepository{db: db}
+}
+
+// Migrations returns the embedded migration files
+func (r *UserRepository) Migrations() fs.FS {
+    return migrations
+}
+```
+
+## Complete Example
+
+### Repository with Migrations
+
+**user_repository.go:**
+```go
+package main
+
+import (
+    "context"
+    "embed"
+    "io/fs"
+    "github.com/jmoiron/sqlx"
+)
+
+//go:embed *.sql
+var migrations embed.FS
+
+type User struct {
+    ID    int    `db:"id"`
+    Name  string `db:"name"`
+    Email string `db:"email"`
+}
+
+type UserRepository struct {
+    db *sqlx.DB
+}
+
+func NewUserRepository(db *sqlx.DB) *UserRepository {
+    return &UserRepository{db: db}
+}
+
+func (r *UserRepository) Migrations() fs.FS {
+    return migrations
+}
+
+func (r *UserRepository) Create(ctx context.Context, name, email string) (User, error) {
+    var user User
+    err := r.db.QueryRowxContext(ctx,
+        "INSERT INTO users (name, email) VALUES ($1, $2) RETURNING id, name, email",
+        name, email,
+    ).StructScan(&user)
+    return user, err
+}
+
+func (r *UserRepository) GetAll(ctx context.Context) ([]User, error) {
+    var users []User
+    err := r.db.SelectContext(ctx, &users, "SELECT id, name, email FROM users")
+    return users, err
+}
+```
+
+**001_create_users_table.sql:**
+```sql
+-- +migrate Up
+CREATE TABLE IF NOT EXISTS users (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    email TEXT UNIQUE NOT NULL
+);
+
+-- +migrate Down
+DROP TABLE users;
+```
+
+### Application Setup
+
+**main.go:**
+```go
+package main
+
+import (
+    "context"
+    "os"
+    "github.com/platforma-dev/platforma/database"
+    "github.com/platforma-dev/platforma/log"
+)
+
+func main() {
+    ctx := context.Background()
+    
+    // Get database connection string from environment
+    connStr := os.Getenv("DATABASE_URL")
+    if connStr == "" {
+        log.ErrorContext(ctx, "DATABASE_URL not set")
+        os.Exit(1)
+    }
+    
+    // Create database connection
+    db, err := database.New(connStr)
+    if err != nil {
+        log.ErrorContext(ctx, "failed to connect", "error", err)
+        os.Exit(1)
+    }
+    
+    // Create and register repository
+    userRepo := NewUserRepository(db.Connection())
+    db.RegisterRepository("users", userRepo)
+    
+    // Run migrations
+    err = db.Migrate(ctx)
+    if err != nil {
+        log.ErrorContext(ctx, "migration failed", "error", err)
+        os.Exit(1)
+    }
+    
+    log.InfoContext(ctx, "migrations completed")
+    
+    // Use the repository
+    user, err := userRepo.Create(ctx, "John Doe", "john@example.com")
+    if err != nil {
+        log.ErrorContext(ctx, "failed to create user", "error", err)
+        os.Exit(1)
+    }
+    
+    log.InfoContext(ctx, "user created", "id", user.ID, "name", user.Name)
+}
+```
+
+## Migration Tracking
+
+Platforma automatically tracks applied migrations in a `migrations` table:
+
+```sql
+CREATE TABLE migrations (
+    repository TEXT NOT NULL,
+    id TEXT NOT NULL,
+    timestamp TIMESTAMP NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (repository, id)
+);
+```
+
+Each migration is tracked by repository name and migration ID, ensuring migrations are only applied once.

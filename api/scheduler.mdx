@@ -1,0 +1,351 @@
+---
+title: "Scheduler"
+description: "Cron-based periodic task execution"
+---
+
+The `scheduler` package provides cron-based periodic task execution for running tasks on a schedule.
+
+## Scheduler Type
+
+The `Scheduler` type represents a periodic task runner that executes an action based on a cron expression.
+
+```go
+type Scheduler struct {
+    cronExpr string             // The cron expression
+    runner   application.Runner // The runner to execute periodically
+}
+```
+
+### Constructor
+
+<ParamField path="New(cronExpr, runner)" type="(*Scheduler, error)">
+  Creates a new Scheduler instance with a cron expression and runner.
+  
+  **Parameters:**
+  - `cronExpr` (string): Cron expression or descriptor
+  - `runner` (application.Runner): Task to execute on schedule
+  
+  **Returns:**
+  - `*Scheduler`: The scheduler instance
+  - `error`: Validation error if cron expression is invalid
+  
+  The constructor validates the cron expression eagerly, so errors are caught immediately rather than at runtime.
+  
+  ```go
+  scheduler, err := scheduler.New("0 9 * * MON-FRI", taskRunner)
+  if err != nil {
+      log.Fatal("invalid cron expression:", err)
+  }
+  ```
+</ParamField>
+
+## Methods
+
+### Run
+
+<ParamField path="Run(ctx context.Context)" type="error">
+  Starts the scheduler and executes the runner according to the cron schedule. The scheduler continues running until the context is canceled.
+  
+  **Behavior:**
+  - Tasks execute in UTC timezone
+  - Each task execution gets a unique trace ID for logging
+  - Errors in tasks are logged but don't stop the scheduler
+  - Returns when context is canceled
+  
+  ```go
+  if err := scheduler.Run(ctx); err != nil {
+      log.ErrorContext(ctx, "scheduler stopped", "error", err)
+  }
+  ```
+</ParamField>
+
+## Cron Expression Formats
+
+Platforma supports standard cron format with 5 fields, plus special descriptors and intervals.
+
+### Standard 5-Field Cron
+
+```
+minute hour day month weekday
+```
+
+<ResponseField name="minute" type="0-59">
+  Minute of the hour (0-59)
+</ResponseField>
+
+<ResponseField name="hour" type="0-23">
+  Hour of the day (0-23)
+</ResponseField>
+
+<ResponseField name="day" type="1-31">
+  Day of the month (1-31)
+</ResponseField>
+
+<ResponseField name="month" type="1-12">
+  Month of the year (1-12)
+</ResponseField>
+
+<ResponseField name="weekday" type="0-6">
+  Day of the week (0-6, where 0 = Sunday)
+</ResponseField>
+
+### Special Characters
+
+- `*` - Any value (e.g., `* * * * *` = every minute)
+- `*/n` - Every n units (e.g., `*/5 * * * *` = every 5 minutes)
+- `n-m` - Range (e.g., `0 9-17 * * *` = every hour from 9 AM to 5 PM)
+- `MON-FRI` - Named weekdays (e.g., `0 9 * * MON-FRI` = 9 AM on weekdays)
+
+### Descriptors
+
+Special descriptors for common schedules:
+
+<ResponseField name="@yearly" type="string">
+  Run once a year at midnight on January 1st
+  
+  Equivalent to: `0 0 1 1 *`
+</ResponseField>
+
+<ResponseField name="@monthly" type="string">
+  Run once a month at midnight on the 1st
+  
+  Equivalent to: `0 0 1 * *`
+</ResponseField>
+
+<ResponseField name="@weekly" type="string">
+  Run once a week at midnight on Sunday
+  
+  Equivalent to: `0 0 * * 0`
+</ResponseField>
+
+<ResponseField name="@daily" type="string">
+  Run once a day at midnight
+  
+  Equivalent to: `0 0 * * *`
+</ResponseField>
+
+<ResponseField name="@hourly" type="string">
+  Run once an hour at the beginning of the hour
+  
+  Equivalent to: `0 * * * *`
+</ResponseField>
+
+### Interval Syntax
+
+For simple intervals, use the `@every` syntax:
+
+<ResponseField name="@every [duration]" type="string">
+  Run at fixed intervals
+  
+  Supported units: `s` (seconds), `m` (minutes), `h` (hours)
+  
+  Examples:
+  - `@every 1s` - Every second
+  - `@every 30s` - Every 30 seconds
+  - `@every 5m` - Every 5 minutes
+  - `@every 2h` - Every 2 hours
+</ResponseField>
+
+## Cron Examples
+
+```go
+// Every 5 minutes
+scheduler.New("*/5 * * * *", task)
+
+// Every 2 hours at minute 0
+scheduler.New("0 */2 * * *", task)
+
+// 9 AM on weekdays
+scheduler.New("0 9 * * MON-FRI", task)
+
+// Midnight every day
+scheduler.New("@daily", task)
+
+// Every 30 minutes
+scheduler.New("@every 30m", task)
+
+// Every second (for high-frequency tasks)
+scheduler.New("@every 1s", task)
+
+// Every hour on the hour
+scheduler.New("@hourly", task)
+
+// 6 PM every day
+scheduler.New("0 18 * * *", task)
+
+// First day of every month at 3 AM
+scheduler.New("0 3 1 * *", task)
+```
+
+## Example Usage
+
+### Basic Scheduled Task
+
+```go
+package main
+
+import (
+    "context"
+    "time"
+    "github.com/platforma-dev/platforma/application"
+    "github.com/platforma-dev/platforma/log"
+    "github.com/platforma-dev/platforma/scheduler"
+)
+
+func cleanupTask(ctx context.Context) error {
+    log.InfoContext(ctx, "running cleanup task")
+    
+    // Cleanup logic here
+    time.Sleep(2 * time.Second)
+    
+    log.InfoContext(ctx, "cleanup completed")
+    return nil
+}
+
+func main() {
+    ctx, cancel := context.WithCancel(context.Background())
+    defer cancel()
+    
+    // Create scheduler that runs every second
+    s, err := scheduler.New("@every 1s", application.RunnerFunc(cleanupTask))
+    if err != nil {
+        log.ErrorContext(ctx, "failed to create scheduler", "error", err)
+        return
+    }
+    
+    // Run scheduler (blocks until context canceled)
+    if err := s.Run(ctx); err != nil {
+        log.ErrorContext(ctx, "scheduler error", "error", err)
+    }
+}
+```
+
+### Multiple Schedulers with Application
+
+```go
+package main
+
+import (
+    "context"
+    "github.com/platforma-dev/platforma/application"
+    "github.com/platforma-dev/platforma/log"
+    "github.com/platforma-dev/platforma/scheduler"
+)
+
+func backupDatabase(ctx context.Context) error {
+    log.InfoContext(ctx, "backing up database")
+    // Backup logic
+    return nil
+}
+
+func sendReports(ctx context.Context) error {
+    log.InfoContext(ctx, "sending daily reports")
+    // Report logic
+    return nil
+}
+
+func cleanupSessions(ctx context.Context) error {
+    log.InfoContext(ctx, "cleaning up expired sessions")
+    // Cleanup logic
+    return nil
+}
+
+func main() {
+    ctx := context.Background()
+    app := application.New()
+    
+    // Daily backup at 2 AM
+    dailyBackup, err := scheduler.New(
+        "0 2 * * *",
+        application.RunnerFunc(backupDatabase),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+    app.RegisterService("daily_backup", dailyBackup)
+    
+    // Daily reports at 9 AM on weekdays
+    weekdayReports, err := scheduler.New(
+        "0 9 * * MON-FRI",
+        application.RunnerFunc(sendReports),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+    app.RegisterService("weekday_reports", weekdayReports)
+    
+    // Cleanup every hour
+    hourlyCleanup, err := scheduler.New(
+        "@hourly",
+        application.RunnerFunc(cleanupSessions),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+    app.RegisterService("hourly_cleanup", hourlyCleanup)
+    
+    if err := app.Run(ctx); err != nil {
+        log.ErrorContext(ctx, "app error", "error", err)
+    }
+}
+```
+
+### Struct-Based Runner
+
+```go
+type ReportService struct {
+    db       *database.Database
+    emailSvc *EmailService
+}
+
+func (s *ReportService) Run(ctx context.Context) error {
+    log.InfoContext(ctx, "generating report")
+    
+    // Query database
+    var stats Stats
+    err := s.db.Connection().GetContext(ctx, &stats, "SELECT COUNT(*) as total FROM users")
+    if err != nil {
+        return err
+    }
+    
+    // Send report
+    return s.emailSvc.SendReport(ctx, stats)
+}
+
+// Usage
+reportSvc := &ReportService{db: db, emailSvc: emailSvc}
+scheduler, err := scheduler.New("@daily", reportSvc)
+```
+
+## Error Handling
+
+The scheduler logs errors but continues running:
+
+```go
+func unreliableTask(ctx context.Context) error {
+    if rand.Float64() < 0.5 {
+        return errors.New("task failed")
+    }
+    log.InfoContext(ctx, "task succeeded")
+    return nil
+}
+
+scheduler, _ := scheduler.New("@every 10s", application.RunnerFunc(unreliableTask))
+
+// Errors are logged automatically:
+// ERROR error in scheduler error="task failed"
+// Task will run again at the next scheduled time
+```
+
+## Trace IDs
+
+Each scheduled task execution gets a unique trace ID for correlated logging:
+
+```go
+func task(ctx context.Context) error {
+    // Context already contains trace ID
+    log.InfoContext(ctx, "task started")
+    // Output: time=... level=INFO msg="task started" traceId=abc-123-def
+    return nil
+}
+```

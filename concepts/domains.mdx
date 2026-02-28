@@ -1,0 +1,430 @@
+---
+title: Domains
+description: Implement domain-driven design with Platforma's Domain interface
+---
+
+Domains are the core organizational unit in Platforma. Each domain represents a **bounded context** - a distinct area of your business logic with its own data models, business rules, and APIs.
+
+## Domain Interface
+
+All domains must implement the simple interface from `application/domain.go:4`:
+
+```go
+type Domain interface {
+    GetRepository() any
+}
+```
+
+This allows the application to access the domain's repository for database migration registration.
+
+<Info>
+The `GetRepository()` method returns `any` because different domains have different repository types. The application only needs the repository reference to call its `Migrations()` method.
+</Info>
+
+## Domain Structure
+
+A typical domain aggregates four components:
+
+```go
+type Domain struct {
+    Repository  *Repository               // Database access
+    Service     *Service                  // Business logic
+    HandleGroup *httpserver.HandlerGroup  // HTTP API (optional)
+    Middleware  httpserver.Middleware     // Request interceptors (optional)
+}
+```
+
+### Component Breakdown
+
+<AccordionGroup>
+  <Accordion title="Repository - Data Access Layer">
+    Handles all database operations for the domain:
+    
+    - CRUD operations
+    - Complex queries
+    - Database migrations
+    - Transaction management
+    
+    Dependencies: Only the database connection
+  </Accordion>
+  
+  <Accordion title="Service - Business Logic Layer">
+    Implements domain business rules:
+    
+    - Validation logic
+    - Orchestrates repository calls
+    - Coordinates with other domains
+    - Contains no HTTP or database code
+    
+    Dependencies: Repository and other domain services
+  </Accordion>
+  
+  <Accordion title="HandlerGroup - HTTP API (Optional)">
+    Exposes HTTP endpoints for the domain:
+    
+    - Route definitions
+    - Request/response handling
+    - Input validation
+    - Error mapping
+    
+    Dependencies: Service layer
+  </Accordion>
+  
+  <Accordion title="Middleware - Request Processing (Optional)">
+    Intercepts HTTP requests:
+    
+    - Authentication/authorization
+    - Request validation
+    - Context enrichment
+    - Response modification
+    
+    Dependencies: Service layer (often)
+  </Accordion>
+</AccordionGroup>
+
+## Real Example: Auth Domain
+
+The `auth` package provides a complete reference implementation. From `auth/domain.go:7`:
+
+```go
+type Domain struct {
+    Repository  *Repository
+    Service     *Service
+    HandleGroup *httpserver.HandlerGroup
+    Middleware  httpserver.Middleware
+}
+
+// Implement Domain interface
+func (d *Domain) GetRepository() any {
+    return d.Repository
+}
+```
+
+### Auth Domain Constructor
+
+From `auth/domain.go:18`, showing full domain initialization:
+
+```go
+func New(
+    db db,
+    authStorage authStorage,
+    sessionCookieName string,
+    usernameValidator, passwordValidator func(string) error,
+    cleanupEnqueuer cleanupEnqueuer,
+) *Domain {
+    // Initialize repository
+    repository := NewRepository(db)
+    
+    // Initialize service with dependencies
+    service := NewService(
+        repository,
+        authStorage,
+        sessionCookieName,
+        usernameValidator,
+        passwordValidator,
+        cleanupEnqueuer,
+    )
+
+    // Create middleware
+    authMiddleware := NewAuthenticationMiddleware(service)
+    
+    // Create HTTP handlers
+    registerHandler := NewRegisterHandler(service)
+    loginHandler := NewLoginHandler(service)
+    logoutHandler := NewLogoutHandler(service)
+    getUserHandler := NewGetHandler(service)
+    changePasswordHandler := authMiddleware.Wrap(NewChangePasswordHandler(service))
+    deleteHandler := authMiddleware.Wrap(NewDeleteHandler(service))
+
+    // Build API handler group
+    authAPI := httpserver.NewHandlerGroup()
+    authAPI.Handle("POST /register", registerHandler)
+    authAPI.Handle("POST /login", loginHandler)
+    authAPI.Handle("POST /logout", logoutHandler)
+    authAPI.Handle("GET /me", getUserHandler)
+    authAPI.Handle("POST /change-password", changePasswordHandler)
+    authAPI.Handle("DELETE /me", deleteHandler)
+
+    return &Domain{
+        Repository:  repository,
+        Service:     service,
+        HandleGroup: authAPI,
+        Middleware:  authMiddleware,
+    }
+}
+```
+
+<Tip>
+Notice how the constructor uses **dependency injection** - all external dependencies are passed as parameters, making the domain testable and flexible.
+</Tip>
+
+## Creating a Domain
+
+Follow these steps to create a new domain:
+
+<Steps>
+  <Step title="Define your domain struct">
+    Create a `domain.go` file:
+    
+    ```go
+    package myfeature
+    
+    import "github.com/platforma-dev/platforma/httpserver"
+    
+    type Domain struct {
+        Repository  *Repository
+        Service     *Service
+        HandleGroup *httpserver.HandlerGroup
+    }
+    ```
+  </Step>
+  
+  <Step title="Implement the Domain interface">
+    Add the required method:
+    
+    ```go
+    func (d *Domain) GetRepository() any {
+        return d.Repository
+    }
+    ```
+  </Step>
+  
+  <Step title="Create a constructor">
+    Initialize all components:
+    
+    ```go
+    func New(db *database.Database) *Domain {
+        repo := NewRepository(db)
+        svc := NewService(repo)
+        
+        api := httpserver.NewHandlerGroup()
+        api.Handle("GET /items", NewGetItemsHandler(svc))
+        api.Handle("POST /items", NewCreateItemHandler(svc))
+        
+        return &Domain{
+            Repository:  repo,
+            Service:     svc,
+            HandleGroup: api,
+        }
+    }
+    ```
+  </Step>
+  
+  <Step title="Register with application">
+    In your `main.go`:
+    
+    ```go
+    domain := myfeature.New(db)
+    app.RegisterDomain("myfeature", "main", domain)
+    ```
+  </Step>
+</Steps>
+
+## Repository Pattern
+
+Repositories handle all database operations:
+
+```go
+type Repository struct {
+    db *database.Database
+}
+
+func NewRepository(db *database.Database) *Repository {
+    return &Repository{db: db}
+}
+
+// Database operations
+func (r *Repository) GetByID(ctx context.Context, id string) (*Item, error) {
+    query := `SELECT id, name, created_at FROM items WHERE id = $1`
+    
+    var item Item
+    err := r.db.GetContext(ctx, &item, query, id)
+    if err != nil {
+        return nil, err
+    }
+    
+    return &item, nil
+}
+
+// Expose migrations
+func (r *Repository) Migrations() []database.Migration {
+    return migrations
+}
+```
+
+<Warning>
+Repositories should **only** interact with the database. No business logic, HTTP handling, or external API calls.
+</Warning>
+
+## Service Pattern
+
+Services implement business logic and orchestrate repository calls:
+
+```go
+type Service struct {
+    repo *Repository
+}
+
+func NewService(repo *Repository) *Service {
+    return &Service{repo: repo}
+}
+
+func (s *Service) CreateItem(ctx context.Context, name string) (*Item, error) {
+    // Validation (business logic)
+    if len(name) < 3 {
+        return nil, errors.New("name too short")
+    }
+    
+    // Use repository for data access
+    item := &Item{
+        ID:        uuid.New(),
+        Name:      name,
+        CreatedAt: time.Now(),
+    }
+    
+    if err := s.repo.Create(ctx, item); err != nil {
+        return nil, fmt.Errorf("failed to create item: %w", err)
+    }
+    
+    return item, nil
+}
+```
+
+## Mounting Domain APIs
+
+Mount your domain's HTTP API to a server:
+
+```go
+// Create domain
+authDomain := auth.New(db, sessionStore, "session", 
+    validateUsername, validatePassword, enqueuer)
+
+// Mount to HTTP server
+api := httpserver.New("8080", 5*time.Second)
+api.HandleGroup("/auth", authDomain.HandleGroup)
+
+// Register server
+app.RegisterService("api", api)
+```
+
+Now all auth routes are available under `/auth`:
+- `POST /auth/register`
+- `POST /auth/login`
+- `GET /auth/me`
+- etc.
+
+<Check>
+Domains are **self-contained**. You can mount the same domain to multiple servers or use it in different applications.
+</Check>
+
+## Using Domain Middleware
+
+Apply domain middleware to protect routes:
+
+```go
+// Protect entire handler group
+protectedAPI := httpserver.NewHandlerGroup()
+protectedAPI.Use(authDomain.Middleware)
+protectedAPI.Handle("GET /profile", getProfileHandler)
+protectedAPI.Handle("POST /settings", updateSettingsHandler)
+
+api.HandleGroup("/user", protectedAPI)
+```
+
+Or wrap individual handlers from `auth/domain.go:27`:
+
+```go
+changePasswordHandler := authMiddleware.Wrap(NewChangePasswordHandler(service))
+```
+
+## Domain Dependencies
+
+Domains can depend on other domains via **service interfaces**:
+
+```go
+// Define interface for what you need
+type UserService interface {
+    GetUser(ctx context.Context, userID string) (*User, error)
+}
+
+// Accept interface in constructor
+func NewOrderService(repo *Repository, users UserService) *Service {
+    return &Service{
+        repo:  repo,
+        users: users,
+    }
+}
+
+// Wire in main.go
+userDomain := user.New(db)
+orderDomain := order.New(db, userDomain.Service)
+```
+
+<Tip>
+Depend on **interfaces**, not concrete types. This keeps domains loosely coupled and makes testing easier.
+</Tip>
+
+## Testing Domains
+
+Test each layer independently:
+
+```go
+// Test repository with real database
+func TestRepository_GetByID(t *testing.T) {
+    db := setupTestDB(t)
+    repo := NewRepository(db)
+    
+    item, err := repo.GetByID(context.Background(), "test-id")
+    // assertions...
+}
+
+// Test service with mock repository
+type mockRepository struct{}
+func (m *mockRepository) GetByID(ctx context.Context, id string) (*Item, error) {
+    return &Item{ID: id, Name: "test"}, nil
+}
+
+func TestService_CreateItem(t *testing.T) {
+    repo := &mockRepository{}
+    svc := NewService(repo)
+    
+    item, err := svc.CreateItem(context.Background(), "test")
+    // assertions...
+}
+```
+
+## Package Organization
+
+Recommended file structure for a domain:
+
+```
+myfeature/
+├── domain.go       # Domain struct + constructor + GetRepository()
+├── model.go        # Data models and types
+├── repository.go   # Database operations
+├── service.go      # Business logic
+├── handler_*.go    # HTTP handlers (one per endpoint)
+├── middleware.go   # HTTP middleware (if needed)
+├── context.go      # Context helpers
+├── errors.go       # Domain-specific errors
+└── migrations/     # SQL migration files
+    ├── 001_init.sql
+    └── 002_add_column.sql
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="HTTP Routing" icon="route" href="/concepts/http-routing">
+    Learn how to define domain APIs with HandlerGroup
+  </Card>
+  <Card title="Middleware" icon="filter" href="/concepts/middleware">
+    Create middleware for authentication and validation
+  </Card>
+  <Card title="Database" icon="database" href="/guides/database-migrations">
+    Set up repositories and migrations
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/concepts/architecture">
+    Understand the complete framework architecture
+  </Card>
+</CardGroup>

@@ -1,0 +1,223 @@
+---
+title: Database Migrations
+description: Learn how to manage database migrations in Platforma using embedded SQL files and the migration system
+---
+
+Platforma provides a built-in migration system that allows you to version control your database schema changes using SQL files with special markers.
+
+## Overview
+
+The migration system is built into the `database.Database` type and automatically discovers migrations from registered repositories. Migrations are executed in order based on their filenames, and the system tracks which migrations have been applied.
+
+## Migration File Format
+
+Migration files use special comment markers to define up and down migrations:
+
+```sql
+-- +migrate Up
+CREATE TABLE IF NOT EXISTS users (
+	id VARCHAR(255) PRIMARY KEY,
+	username VARCHAR(255) UNIQUE,
+	password TEXT,
+	salt TEXT,
+	created TIMESTAMP,
+	updated TIMESTAMP,
+	status VARCHAR(50)
+);
+
+-- +migrate Down
+DROP TABLE users;
+```
+
+### Migration Markers
+
+- `-- +migrate Up`: Required marker that indicates the beginning of the forward migration
+- `-- +migrate Down`: Optional marker for rollback SQL (placed after the Up section)
+- `-- +migrate ID: <custom_id>`: Optional ID override (must be the first marker if used)
+
+### Migration ID
+
+By default, the migration ID is derived from the filename without the `.sql` extension. For example, `1770095236_init.sql` has an ID of `1770095236_init`.
+
+You can override this by adding an ID marker as the first line:
+
+```sql
+-- +migrate ID: custom_migration_id
+-- +migrate Up
+CREATE TABLE ...
+```
+
+## Embedding Migrations
+
+Use Go's `embed` package to bundle migration files with your repository:
+
+```go
+package auth
+
+import (
+	"embed"
+	"io/fs"
+)
+
+//go:embed migrations/*.sql
+var migrations embed.FS
+
+type Repository struct {
+	db db
+}
+
+func (r *Repository) Migrations() fs.FS {
+	m, _ := fs.Sub(migrations, "migrations")
+	return m
+}
+```
+
+The `Migrations()` method must return an `fs.FS` containing your SQL files. Place your migration files in a `migrations/` subdirectory next to your repository code.
+
+## Registering Repositories
+
+Register your repository with the database to enable automatic migration discovery:
+
+```go
+db, err := database.New(connectionString)
+if err != nil {
+	return err
+}
+
+authRepo := auth.NewRepository(db.Connection())
+db.RegisterRepository("auth", authRepo)
+```
+
+The `RegisterRepository` method automatically detects if your repository implements the `migrator` interface (has a `Migrations()` method) and registers it for migration.
+
+## Running Migrations
+
+Run all pending migrations with the `Migrate` method:
+
+```go
+err := db.Migrate(ctx)
+if err != nil {
+	log.ErrorContext(ctx, "migration failed", "error", err)
+	return err
+}
+```
+
+The migration system:
+
+1. Creates a migrations tracking table if it doesn't exist
+2. Reads all migration logs to determine which migrations have been applied
+3. Collects migrations from all registered repositories
+4. Applies pending migrations in lexicographic order by filename
+5. Records successfully applied migrations
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use timestamps in filenames">
+    Name migration files with a timestamp prefix to ensure correct ordering:
+    ```
+    migrations/
+    ├── 1770095236_init.sql
+    ├── 1770095300_add_email_column.sql
+    └── 1770095450_create_index.sql
+    ```
+  </Accordion>
+
+  <Accordion title="Make migrations idempotent">
+    Use `IF NOT EXISTS` and `IF EXISTS` clauses to make migrations safe to re-run:
+    ```sql
+    -- +migrate Up
+    CREATE TABLE IF NOT EXISTS users (...);
+    CREATE INDEX IF NOT EXISTS idx_username ON users(username);
+
+    -- +migrate Down
+    DROP INDEX IF EXISTS idx_username;
+    DROP TABLE IF EXISTS users;
+    ```
+  </Accordion>
+
+  <Accordion title="Test both Up and Down migrations">
+    Always provide a Down migration and test that it correctly reverses the Up migration. This ensures you can roll back changes if needed.
+  </Accordion>
+
+  <Accordion title="One logical change per migration">
+    Keep migrations focused on a single logical change to make them easier to understand and roll back if necessary.
+  </Accordion>
+</AccordionGroup>
+
+## Example: Complete Migration Setup
+
+<Steps>
+  <Step title="Create migration directory">
+    Create a `migrations/` directory in your repository package:
+    ```bash
+    mkdir -p myrepo/migrations
+    ```
+  </Step>
+
+  <Step title="Write migration file">
+    Create a migration file with timestamp prefix:
+    ```sql title="myrepo/migrations/1770095236_init.sql"
+    -- +migrate Up
+    CREATE TABLE IF NOT EXISTS items (
+      id VARCHAR(255) PRIMARY KEY,
+      name TEXT NOT NULL,
+      created TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- +migrate Down
+    DROP TABLE IF EXISTS items;
+    ```
+  </Step>
+
+  <Step title="Embed migrations in repository">
+    Add the embed directive and Migrations method:
+    ```go title="myrepo/repository.go"
+    package myrepo
+
+    import (
+      "embed"
+      "io/fs"
+    )
+
+    //go:embed migrations/*.sql
+    var migrations embed.FS
+
+    type Repository struct {
+      db db
+    }
+
+    func (r *Repository) Migrations() fs.FS {
+      m, _ := fs.Sub(migrations, "migrations")
+      return m
+    }
+    ```
+  </Step>
+
+  <Step title="Register and migrate">
+    Register the repository and run migrations:
+    ```go
+    db, err := database.New(connectionString)
+    if err != nil {
+      return err
+    }
+
+    repo := myrepo.NewRepository(db.Connection())
+    db.RegisterRepository("myrepo", repo)
+
+    if err := db.Migrate(ctx); err != nil {
+      return err
+    }
+    ```
+  </Step>
+</Steps>
+
+## Migration Tracking
+
+The system tracks applied migrations in a `migrations` table with columns:
+
+- `repository`: The name used when calling `RegisterRepository`
+- `id`: The migration ID (filename without extension or custom ID)
+- `timestamp`: When the migration was applied
+
+This ensures migrations are only applied once per repository.

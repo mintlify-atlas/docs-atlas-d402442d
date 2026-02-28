@@ -1,0 +1,427 @@
+---
+title: Sessions
+description: Manage user sessions with database-backed storage in Platforma
+---
+
+Platforma's session domain provides database-backed session management with automatic expiration tracking and user association.
+
+## Overview
+
+The session package provides:
+
+- Session creation and retrieval
+- User association
+- Expiration tracking
+- Database persistence
+- Integration with the auth domain
+
+## Session Model
+
+Sessions are represented by the `Session` struct:
+
+```go
+type Session struct {
+	ID      string    `db:"id"      json:"id"`
+	User    string    `db:"user"    json:"user"`
+	Created time.Time `db:"created" json:"created"`
+	Expires time.Time `db:"expires" json:"expires"`
+}
+```
+
+Each session:
+- Has a unique ID (UUID)
+- Is associated with a user ID
+- Tracks creation time
+- Has an expiration timestamp
+
+### Checking Expiration
+
+The `Session` model includes a helper method:
+
+```go
+if session.IsExpired() {
+	// Session has expired
+	return errors.New("session expired")
+}
+```
+
+## Setting Up Sessions
+
+<Steps>
+  <Step title="Create database connection">
+    ```go
+    import (
+      "github.com/platforma-dev/platforma/database"
+      "github.com/platforma-dev/platforma/session"
+    )
+
+    db, err := database.New(connectionString)
+    if err != nil {
+      return err
+    }
+    ```
+  </Step>
+
+  <Step title="Create session domain">
+    ```go
+    sessionDomain := session.New(db.Connection())
+    ```
+    The `New` function creates both the repository and service.
+  </Step>
+
+  <Step title="Register repository">
+    ```go
+    db.RegisterRepository("session", sessionDomain.Repository)
+    ```
+    This enables automatic migration of the sessions table.
+  </Step>
+
+  <Step title="Run migrations">
+    ```go
+    if err := db.Migrate(ctx); err != nil {
+      return err
+    }
+    ```
+  </Step>
+</Steps>
+
+## Service Methods
+
+The `session.Service` provides methods for session management:
+
+### Create Session
+
+Create a new session manually:
+
+```go
+import "github.com/google/uuid"
+
+session := &session.Session{
+	ID:      uuid.NewString(),
+	User:    userID,
+	Created: time.Now(),
+	Expires: time.Now().Add(24 * time.Hour),
+}
+
+err := sessionService.Create(ctx, session)
+if err != nil {
+	return err
+}
+```
+
+### Create Session for User
+
+Create a session for a user (automatically sets ID, timestamps):
+
+```go
+sessionID, err := sessionService.CreateSessionForUser(ctx, userID)
+if err != nil {
+	return fmt.Errorf("failed to create session: %w", err)
+}
+
+// Use sessionID as cookie value
+```
+
+Default expiration is 100 days from creation:
+```go
+Expires: time.Now().Add(100 * 24 * time.Hour)
+```
+
+### Get Session
+
+Retrieve a session by ID:
+
+```go
+session, err := sessionService.Get(ctx, sessionID)
+if err != nil {
+	return err
+}
+
+fmt.Printf("Session for user: %s\n", session.User)
+```
+
+### Get Session by User ID
+
+Retrieve a session by user ID:
+
+```go
+session, err := sessionService.GetByUserId(ctx, userID)
+if err != nil {
+	return err
+}
+```
+
+### Get User ID from Session
+
+Extract the user ID from a session:
+
+```go
+userID, err := sessionService.GetUserIdFromSessionId(ctx, sessionID)
+if err != nil {
+	return err
+}
+```
+
+This is commonly used by the auth middleware to identify the current user.
+
+### Delete Session
+
+Delete a specific session:
+
+```go
+err := sessionService.DeleteSession(ctx, sessionID)
+if err != nil {
+	return err
+}
+```
+
+### Delete All User Sessions
+
+Delete all sessions for a user (useful for logout from all devices):
+
+```go
+err := sessionService.DeleteSessionsByUserId(ctx, userID)
+if err != nil {
+	return err
+}
+```
+
+## Integration with Auth
+
+The session service is designed to work with the auth domain. The auth service uses it to manage authentication sessions:
+
+```go
+// Auth service depends on session service
+authService := auth.NewService(
+	authRepo,
+	sessionDomain.Service,  // Pass session service
+	"session_id",
+	nil, nil, nil,
+)
+```
+
+The auth service uses these session methods:
+- `CreateSessionForUser` - When logging in
+- `GetUserIdFromSessionId` - In authentication middleware
+- `DeleteSession` - When logging out
+- `DeleteSessionsByUserId` - When deleting a user account
+
+## Domain Structure
+
+The `session.Domain` contains both repository and service:
+
+```go
+type Domain struct {
+	Repository *Repository
+	Service    *Service
+}
+```
+
+Access them via:
+
+```go
+sessionDomain := session.New(db.Connection())
+
+// Access repository (for migrations)
+db.RegisterRepository("session", sessionDomain.Repository)
+
+// Access service (for session operations)
+sessionID, err := sessionDomain.Service.CreateSessionForUser(ctx, userID)
+```
+
+## Repository Implementation
+
+The repository handles database operations:
+
+```go
+type Repository struct {
+	db db
+}
+
+func NewRepository(db db) *Repository {
+	return &Repository{db: db}
+}
+```
+
+It implements the migrator interface:
+
+```go
+func (r *Repository) Migrations() fs.FS {
+	m, _ := fs.Sub(migrations, "migrations")
+	return m
+}
+```
+
+Migrations are embedded from `session/migrations/*.sql`.
+
+## Database Schema
+
+The sessions table structure:
+
+```sql
+CREATE TABLE sessions (
+  id VARCHAR(255) PRIMARY KEY,
+  "user" VARCHAR(255) NOT NULL,
+  created TIMESTAMP NOT NULL,
+  expires TIMESTAMP NOT NULL
+);
+```
+
+Note: The `user` column is quoted because `user` is a reserved word in PostgreSQL.
+
+## Custom Expiration
+
+To customize session expiration, create sessions manually:
+
+```go
+// Session expires in 1 hour
+session := &session.Session{
+	ID:      uuid.NewString(),
+	User:    userID,
+	Created: time.Now(),
+	Expires: time.Now().Add(1 * time.Hour),
+}
+
+err := sessionService.Create(ctx, session)
+```
+
+Or modify the service method (requires forking or wrapping).
+
+## Session Cleanup
+
+Expired sessions are not automatically deleted from the database. You should periodically clean them up:
+
+<CodeGroup>
+```go Manual Cleanup
+func cleanupExpiredSessions(ctx context.Context, db *sqlx.DB) error {
+	query := `DELETE FROM sessions WHERE expires < NOW()`
+	result, err := db.ExecContext(ctx, query)
+	if err != nil {
+		return err
+	}
+	
+	rows, _ := result.RowsAffected()
+	log.InfoContext(ctx, "cleaned up sessions", "deleted", rows)
+	return nil
+}
+```
+
+```go Scheduled Cleanup
+import "github.com/platforma-dev/platforma/scheduler"
+
+type CleanupRunner struct {
+	db *database.Database
+}
+
+func (r *CleanupRunner) Run(ctx context.Context) error {
+	query := `DELETE FROM sessions WHERE expires < NOW()`
+	result, err := r.db.Connection().ExecContext(ctx, query)
+	if err != nil {
+		return err
+	}
+	
+	rows, _ := result.RowsAffected()
+	log.InfoContext(ctx, "cleaned up sessions", "deleted", rows)
+	return nil
+}
+
+// Schedule daily cleanup
+cleanupRunner := &CleanupRunner{db: db}
+scheduler, _ := scheduler.New("@daily", cleanupRunner)
+app.AddRunner("session-cleanup", scheduler)
+```
+</CodeGroup>
+
+## Session Validation
+
+Always check session expiration when validating:
+
+```go
+session, err := sessionService.Get(ctx, sessionID)
+if err != nil {
+	return nil, err
+}
+
+if session.IsExpired() {
+	// Clean up expired session
+	sessionService.DeleteSession(ctx, sessionID)
+	return nil, errors.New("session expired")
+}
+
+// Session is valid
+return session, nil
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Set reasonable expiration" icon="clock">
+    Balance security and UX: short expiration (hours/days) for sensitive apps, longer (weeks/months) for convenience.
+  </Card>
+
+  <Card title="Clean up expired sessions" icon="trash">
+    Schedule periodic cleanup to prevent the sessions table from growing indefinitely.
+  </Card>
+
+  <Card title="Invalidate on logout" icon="right-from-bracket">
+    Always delete sessions when users explicitly log out.
+  </Card>
+
+  <Card title="Rotate session IDs" icon="rotate">
+    Consider rotating session IDs after privileged operations to prevent session fixation attacks.
+  </Card>
+</CardGroup>
+
+## Complete Example
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"github.com/platforma-dev/platforma/database"
+	"github.com/platforma-dev/platforma/session"
+)
+
+func main() {
+	ctx := context.Background()
+
+	// Setup
+	db, _ := database.New("postgres://localhost/myapp")
+	sessionDomain := session.New(db.Connection())
+	db.RegisterRepository("session", sessionDomain.Repository)
+	db.Migrate(ctx)
+
+	sessionService := sessionDomain.Service
+
+	// Create session
+	userID := "user123"
+	sessionID, err := sessionService.CreateSessionForUser(ctx, userID)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("Created session: %s\n", sessionID)
+
+	// Retrieve session
+	session, err := sessionService.Get(ctx, sessionID)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("Session for user: %s\n", session.User)
+
+	// Check expiration
+	if session.IsExpired() {
+		fmt.Println("Session expired")
+	} else {
+		fmt.Printf("Session valid until: %s\n", session.Expires)
+	}
+
+	// Delete session
+	err = sessionService.DeleteSession(ctx, sessionID)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("Session deleted")
+}
+```

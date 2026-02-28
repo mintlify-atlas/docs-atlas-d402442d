@@ -1,0 +1,450 @@
+---
+title: 'Session Package'
+description: 'Session storage and management for user authentication'
+---
+
+## Overview
+
+The `session` package provides session management functionality for authentication systems. It handles session creation, retrieval, and deletion with database persistence.
+
+## Domain
+
+### session.Domain
+
+The main domain aggregate for session management.
+
+```go
+type Domain struct {
+    Repository *Repository
+    Service    *Service
+}
+```
+
+<ParamField path="Repository" type="*Repository">
+  Database repository for session persistence
+</ParamField>
+
+<ParamField path="Service" type="*Service">
+  Business logic service for session operations
+</ParamField>
+
+### Constructor
+
+```go
+func New(db db) *Domain
+```
+
+<ParamField path="db" type="db" required>
+  Database interface (sqlx-compatible)
+</ParamField>
+
+<ResponseField name="Domain" type="*Domain">
+  Configured session domain with repository and service
+</ResponseField>
+
+## Service
+
+### session.Service
+
+Core business logic for session management.
+
+```go
+type Service struct {
+    repo *Repository
+}
+```
+
+### Methods
+
+#### CreateSessionForUser
+
+```go
+func (s *Service) CreateSessionForUser(ctx context.Context, userId string) (string, error)
+```
+
+Creates a new session for a user with a 100-day expiration.
+
+<ParamField path="userId" type="string" required>
+  User ID to associate with the session
+</ParamField>
+
+<ResponseField name="sessionId" type="string">
+  Generated UUID for the new session
+</ResponseField>
+
+<ResponseField name="error" type="error">
+  Error if session creation fails
+</ResponseField>
+
+session/service.go:46
+
+#### GetUserIdFromSessionId
+
+```go
+func (s *Service) GetUserIdFromSessionId(ctx context.Context, id string) (string, error)
+```
+
+Retrieves the user ID associated with a session.
+
+<ParamField path="id" type="string" required>
+  Session ID to lookup
+</ParamField>
+
+<ResponseField name="userId" type="string">
+  User ID associated with the session
+</ResponseField>
+
+<ResponseField name="error" type="error">
+  Error if session not found
+</ResponseField>
+
+session/service.go:37
+
+#### Get
+
+```go
+func (s *Service) Get(ctx context.Context, id string) (*Session, error)
+```
+
+Retrieves a session by ID.
+
+<ParamField path="id" type="string" required>
+  Session ID to retrieve
+</ParamField>
+
+<ResponseField name="Session" type="*Session">
+  Session object if found
+</ResponseField>
+
+<ResponseField name="error" type="error">
+  Error if session not found
+</ResponseField>
+
+session/service.go:25
+
+#### GetByUserId
+
+```go
+func (s *Service) GetByUserId(ctx context.Context, id string) (*Session, error)
+```
+
+Retrieves a session by user ID.
+
+<ParamField path="id" type="string" required>
+  User ID to lookup
+</ParamField>
+
+<ResponseField name="Session" type="*Session">
+  Session object if found
+</ResponseField>
+
+<ResponseField name="error" type="error">
+  Error if session not found
+</ResponseField>
+
+session/service.go:29
+
+#### DeleteSession
+
+```go
+func (s *Service) DeleteSession(ctx context.Context, id string) error
+```
+
+Deletes a session by ID.
+
+<ParamField path="id" type="string" required>
+  Session ID to delete
+</ParamField>
+
+<ResponseField name="error" type="error">
+  Error if deletion fails
+</ResponseField>
+
+session/service.go:33
+
+#### DeleteSessionsByUserId
+
+```go
+func (s *Service) DeleteSessionsByUserId(ctx context.Context, userId string) error
+```
+
+Deletes all sessions for a user (used during account deletion).
+
+<ParamField path="userId" type="string" required>
+  User ID whose sessions to delete
+</ParamField>
+
+<ResponseField name="error" type="error">
+  Error if deletion fails
+</ResponseField>
+
+session/service.go:62
+
+#### Create
+
+```go
+func (s *Service) Create(ctx context.Context, session *Session) error
+```
+
+Creates a session with custom parameters.
+
+<ParamField path="session" type="*Session" required>
+  Session object to create
+</ParamField>
+
+<ResponseField name="error" type="error">
+  Error if creation fails
+</ResponseField>
+
+session/service.go:21
+
+## Repository
+
+### session.Repository
+
+Database operations for session persistence.
+
+```go
+type Repository struct {
+    db db
+}
+```
+
+### Methods
+
+```go
+func (r *Repository) Get(ctx context.Context, id string) (*Session, error)
+func (r *Repository) GetByUserId(ctx context.Context, userID string) (*Session, error)
+func (r *Repository) Create(ctx context.Context, session *Session) error
+func (r *Repository) Delete(ctx context.Context, id string) error
+func (r *Repository) DeleteByUserId(ctx context.Context, userId string) error
+func (r *Repository) Migrations() fs.FS
+```
+
+#### Get
+
+Retrieves a session from the `sessions` table by session ID.
+
+**Query:** `SELECT * FROM sessions WHERE id = $1`
+
+session/repository.go:36
+
+#### GetByUserId
+
+Retrieves a session from the `sessions` table by user ID.
+
+**Query:** `SELECT * FROM sessions WHERE "user" = $1`
+
+session/repository.go:45
+
+#### Create
+
+Inserts a new session into the `sessions` table.
+
+**Query:**
+```sql
+INSERT INTO sessions (id, "user", created, expires)
+VALUES (:id, :user, :created, :expires)
+```
+
+session/repository.go:54
+
+#### Delete
+
+Deletes a session by ID.
+
+**Query:** `DELETE FROM sessions WHERE id = $1`
+
+session/repository.go:66
+
+#### DeleteByUserId
+
+Deletes all sessions for a user.
+
+**Query:** `DELETE FROM sessions WHERE "user" = $1`
+
+session/repository.go:77
+
+#### Migrations
+
+Returns embedded SQL migrations for the sessions table.
+
+session/repository.go:31
+
+## Models
+
+### Session
+
+```go
+type Session struct {
+    ID      string    `db:"id"      json:"id"`
+    User    string    `db:"user"    json:"user"`
+    Created time.Time `db:"created" json:"created"`
+    Expires time.Time `db:"expires" json:"expires"`
+}
+```
+
+<ParamField path="ID" type="string">
+  UUID primary key for the session
+</ParamField>
+
+<ParamField path="User" type="string">
+  Foreign key to user ID
+</ParamField>
+
+<ParamField path="Created" type="time.Time">
+  Timestamp when session was created
+</ParamField>
+
+<ParamField path="Expires" type="time.Time">
+  Timestamp when session expires (default: 100 days from creation)
+</ParamField>
+
+session/model.go:5
+
+### IsExpired
+
+```go
+func (s *Session) IsExpired() bool
+```
+
+Checks if the session has expired by comparing the expiration time with the current time.
+
+<ResponseField name="expired" type="bool">
+  `true` if session is expired, `false` otherwise
+</ResponseField>
+
+session/model.go:12
+
+## Session Storage
+
+Sessions are stored in a PostgreSQL `sessions` table with the following schema:
+
+```sql
+CREATE TABLE sessions (
+    id      TEXT PRIMARY KEY,
+    "user"  TEXT NOT NULL,
+    created TIMESTAMP NOT NULL,
+    expires TIMESTAMP NOT NULL
+);
+```
+
+**Storage characteristics:**
+- Session IDs are UUIDs generated with `uuid.NewString()`
+- Sessions expire after 100 days by default
+- Sessions are deleted on user logout or account deletion
+- Multiple sessions per user are supported
+
+## Usage Example
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "time"
+
+    "github.com/platforma-dev/platforma/database"
+    "github.com/platforma-dev/platforma/session"
+)
+
+func main() {
+    // Setup database
+    dbDomain := database.New(database.Config{
+        Host:     "localhost",
+        Port:     5432,
+        Database: "myapp",
+        User:     "postgres",
+        Password: "password",
+    })
+
+    // Initialize session domain
+    sessionDomain := session.New(dbDomain.Service)
+
+    ctx := context.Background()
+
+    // Create a session for a user
+    userId := "user-123"
+    sessionId, err := sessionDomain.Service.CreateSessionForUser(ctx, userId)
+    if err != nil {
+        panic(err)
+    }
+    fmt.Printf("Created session: %s\n", sessionId)
+
+    // Retrieve user ID from session
+    retrievedUserId, err := sessionDomain.Service.GetUserIdFromSessionId(ctx, sessionId)
+    if err != nil {
+        panic(err)
+    }
+    fmt.Printf("Session belongs to user: %s\n", retrievedUserId)
+
+    // Get full session details
+    sessionObj, err := sessionDomain.Service.Get(ctx, sessionId)
+    if err != nil {
+        panic(err)
+    }
+    fmt.Printf("Session created: %v\n", sessionObj.Created)
+    fmt.Printf("Session expires: %v\n", sessionObj.Expires)
+    fmt.Printf("Is expired: %v\n", sessionObj.IsExpired())
+
+    // Delete the session (logout)
+    err = sessionDomain.Service.DeleteSession(ctx, sessionId)
+    if err != nil {
+        panic(err)
+    }
+    fmt.Println("Session deleted")
+}
+```
+
+## Integration with Auth
+
+The session package is designed to work seamlessly with the auth package:
+
+```go
+import (
+    "github.com/platforma-dev/platforma/auth"
+    "github.com/platforma-dev/platforma/session"
+)
+
+// Session service implements the authStorage interface
+type authStorage interface {
+    GetUserIdFromSessionId(context.Context, string) (string, error)
+    CreateSessionForUser(context.Context, string) (string, error)
+    DeleteSession(ctx context.Context, sessionId string) error
+    DeleteSessionsByUserId(ctx context.Context, userId string) error
+}
+
+// Initialize both domains
+sessionDomain := session.New(db)
+authDomain := auth.New(
+    db,
+    sessionDomain.Service,  // Pass session service as authStorage
+    "session_id",
+    nil,  // default username validator
+    nil,  // default password validator
+    nil,  // no cleanup enqueuer
+)
+```
+
+## Session Lifecycle
+
+1. **Creation**: When user logs in, `CreateSessionForUser` generates a UUID and stores it with 100-day expiration
+2. **Validation**: On each protected request, middleware calls `GetUserIdFromSessionId` to validate session and retrieve user
+3. **Expiration**: Sessions automatically expire after 100 days (can be checked with `IsExpired()`)
+4. **Deletion**: Sessions are deleted on logout or account deletion via `DeleteSession` or `DeleteSessionsByUserId`
+
+## Database Interface
+
+The repository requires a database interface with these methods:
+
+```go
+type db interface {
+    NamedExecContext(ctx context.Context, query string, arg any) (sql.Result, error)
+    GetContext(ctx context.Context, dest any, query string, args ...any) error
+    SelectContext(ctx context.Context, dest any, query string, args ...any) error
+    ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+```
+
+This interface is compatible with `sqlx.DB` from the `github.com/jmoiron/sqlx` package.

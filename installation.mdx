@@ -1,0 +1,262 @@
+---
+title: Installation
+description: Set up Platforma in your Go project and configure your development environment.
+---
+
+# Installation
+
+Get started with Platforma by adding it to your Go project. This guide covers installation, prerequisites, and basic project setup.
+
+## Prerequisites
+
+<CardGroup cols={2}>
+  <Card title="Go 1.25+" icon="golang">
+    Platforma requires Go version 1.25.0 or higher
+  </Card>
+  <Card title="PostgreSQL" icon="database">
+    PostgreSQL database for persistence (optional for basic usage)
+  </Card>
+</CardGroup>
+
+### Check Your Go Version
+
+Verify you have the correct Go version installed:
+
+```bash
+go version
+```
+
+You should see output like:
+
+```
+go version go1.25.0 darwin/arm64
+```
+
+If you need to upgrade, download the latest version from [golang.org](https://golang.org/dl/).
+
+## Install Platforma
+
+Add Platforma to your project using `go get`:
+
+```bash
+go get github.com/platforma-dev/platforma
+```
+
+This command will:
+- Download the Platforma module and its dependencies
+- Update your `go.mod` file with the required dependencies
+- Make all Platforma packages available for import
+
+<Tip>
+Platforma uses semantic versioning. Pin to a specific version in production:
+```bash
+go get github.com/platforma-dev/platforma@v1.2.3
+```
+</Tip>
+
+## Dependencies
+
+Platforma brings in several carefully selected dependencies:
+
+| Package | Purpose |
+|---------|--------|
+| `github.com/jmoiron/sqlx` | Extended SQL operations |
+| `github.com/lib/pq` | PostgreSQL driver |
+| `github.com/google/uuid` | UUID generation |
+| `github.com/robfig/cron/v3` | Cron-based scheduling |
+| `golang.org/x/crypto` | Password hashing |
+
+<Note>
+Platforma uses the **lib/pq** PostgreSQL driver, not pgx. If you're migrating from another framework, you may need to adjust your database connection strings.
+</Note>
+
+## Create a New Project
+
+Start a new Go project with Platforma:
+
+```bash
+# Create project directory
+mkdir my-platforma-app
+cd my-platforma-app
+
+# Initialize Go module
+go mod init github.com/yourusername/my-platforma-app
+
+# Install Platforma
+go get github.com/platforma-dev/platforma
+```
+
+## Basic Project Structure
+
+Organize your Platforma application with this recommended structure:
+
+```
+my-platforma-app/
+├── cmd/
+│   └── api/
+│       └── main.go           # Application entry point
+├── internal/
+│   ├── auth/                 # Auth domain
+│   │   ├── domain.go
+│   │   ├── repository.go
+│   │   ├── service.go
+│   │   └── handlers.go
+│   └── user/                 # User domain
+│       ├── domain.go
+│       ├── repository.go
+│       └── service.go
+├── migrations/               # Database migrations
+│   └── 001_initial.sql
+├── go.mod
+└── go.sum
+```
+
+## Minimal Setup
+
+Create a minimal `main.go` to verify your installation:
+
+```go main.go
+package main
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/platforma-dev/platforma/application"
+)
+
+func main() {
+	ctx := context.Background()
+	app := application.New()
+
+	fmt.Println("Platforma installed successfully!")
+
+	if err := app.Run(ctx); err != nil {
+		fmt.Printf("Error: %v\n", err)
+	}
+}
+```
+
+Run it:
+
+```bash
+go run cmd/api/main.go run
+```
+
+<Warning>
+Platforma applications use a command-based CLI. You must specify a command:
+- `run` - Start the application services
+- `migrate` - Run database migrations
+- `--help` - Show usage information
+</Warning>
+
+## Database Setup (Optional)
+
+If your application uses a database, set up PostgreSQL:
+
+### Using Docker
+
+```bash
+docker run --name platforma-db \
+  -e POSTGRES_PASSWORD=devpassword \
+  -e POSTGRES_DB=myapp \
+  -p 5432:5432 \
+  -d postgres:16
+```
+
+### Connection String Format
+
+Platforma uses the `lib/pq` connection string format:
+
+```go
+connectionString := "postgres://username:password@localhost:5432/dbname?sslmode=disable"
+```
+
+<Note>
+For production, always use `sslmode=require` and never commit credentials to version control. Use environment variables or a secrets manager.
+</Note>
+
+## Verify Installation
+
+Check that all dependencies are correctly installed:
+
+```bash
+go mod tidy
+go mod verify
+```
+
+You should see:
+
+```
+all modules verified
+```
+
+## Development Tools (Optional)
+
+Platforma projects typically use Task for common operations:
+
+```bash
+# Install Task runner (optional)
+go install github.com/go-task/task/v3/cmd/task@latest
+
+# Run linting
+task lint
+
+# Run tests
+task test
+
+# Run checks (lint + test)
+task check
+```
+
+<Tip>
+The Platforma repository includes a `Taskfile.yml` with pre-configured tasks for linting, testing, and checking code quality.
+</Tip>
+
+## What's Next?
+
+<Steps>
+  <Step title="Build Your First Server">
+    Follow the [Quickstart Guide](/quickstart) to create a working HTTP server
+  </Step>
+  <Step title="Learn Core Concepts">
+    Understand domains, services, and the application lifecycle
+  </Step>
+  <Step title="Explore Examples">
+    Check out the demo-app in the Platforma repository
+  </Step>
+</Steps>
+
+## Troubleshooting
+
+### Go Version Too Old
+
+If you see errors about Go version:
+
+```
+go.mod requires go >= 1.25, but go is version 1.22
+```
+
+Upgrade Go to version 1.25 or higher.
+
+### Module Not Found
+
+If imports fail:
+
+```bash
+go mod tidy
+go clean -modcache
+go get github.com/platforma-dev/platforma
+```
+
+### PostgreSQL Connection Issues
+
+Verify your database is running and accessible:
+
+```bash
+psql -h localhost -U username -d dbname
+```
+
+<Card title="Ready to build?" icon="rocket" href="/quickstart">
+  Create your first Platforma HTTP server
+</Card>

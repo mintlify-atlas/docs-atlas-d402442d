@@ -1,0 +1,135 @@
+---
+title: Introduction
+description: Platforma is a Go web framework built with domain-driven design principles for building scalable, maintainable applications.
+---
+
+# Welcome to Platforma
+
+Platforma is a modern Go web framework that embraces domain-driven architecture to help you build robust, production-ready web applications. It provides a comprehensive set of tools for HTTP servers, database management, background jobs, scheduled tasks, and structured logging.
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Get started with Platforma in your Go project
+  </Card>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Build your first HTTP server in minutes
+  </Card>
+  <Card title="Core Concepts" icon="book" href="/concepts/architecture">
+    Learn about domains, services, and architecture
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/application">
+    Explore the complete API documentation
+  </Card>
+</CardGroup>
+
+## Why Platforma?
+
+Platforma is designed around **domain-driven design principles**, giving you a clear structure for organizing your application logic into bounded contexts. Each domain encapsulates its repository, service layer, HTTP handlers, and middleware—making your codebase maintainable and testable.
+
+### Built for Production
+
+<CardGroup cols={3}>
+  <Card title="Graceful Shutdown" icon="power-off">
+    All services handle shutdown signals properly, draining connections before exit
+  </Card>
+  <Card title="Health Checks" icon="heart-pulse">
+    Built-in health check endpoints for monitoring service status
+  </Card>
+  <Card title="Structured Logging" icon="list">
+    Context-aware logging with trace IDs for request tracking
+  </Card>
+</CardGroup>
+
+## Key Features
+
+### Application Lifecycle Management
+
+The `Application` type orchestrates your entire application lifecycle—from startup tasks to graceful shutdown. Register services, databases, and domains, and let Platforma handle the rest.
+
+```go
+app := application.New()
+app.RegisterService("api", httpServer)
+app.RegisterDatabase("main", database)
+app.RegisterDomain("auth", "main", authDomain)
+app.Run(ctx)
+```
+
+### HTTP Server with Middleware
+
+Build RESTful APIs with an intuitive routing system that supports middleware at both server and route group levels. Includes built-in middleware for trace IDs, authentication, panic recovery, and more.
+
+```go
+server := httpserver.New("8080", 3*time.Second)
+server.Use(log.NewTraceIDMiddleware(nil, ""))
+server.HandleFunc("/health", healthHandler)
+```
+
+### Database Integration
+
+PostgreSQL integration with `sqlx` for powerful SQL operations and an embedded migration system. Migrations are versioned SQL files tracked automatically.
+
+<Note>
+Platforma uses the `lib/pq` PostgreSQL driver, not `pgx`.
+</Note>
+
+### Background Job Processing
+
+Generic queue processor with worker pools for handling background jobs. Supports graceful shutdown with configurable timeouts to drain remaining jobs.
+
+```go
+processor := queue.New(handler, queueProvider, workersAmount, shutdownTimeout)
+app.RegisterService("queue", processor)
+```
+
+### Scheduled Tasks
+
+Cron-based task scheduler for periodic execution. Supports standard cron expressions and interval syntax like `@every 5m`.
+
+```go
+scheduler, _ := scheduler.New("0 2 * * *", cleanupTask)
+app.RegisterService("scheduler", scheduler)
+```
+
+### Domain-Driven Architecture
+
+Organize your application into domains—bounded contexts that encapsulate all related functionality:
+
+- **Repository**: Database operations and migrations
+- **Service**: Business logic and domain rules
+- **Handlers**: HTTP endpoint controllers
+- **Middleware**: Request processing and authentication
+
+See the [auth domain](/api/auth) as a complete reference implementation.
+
+## Framework Philosophy
+
+<Warning>
+Platforma enforces strict conventions for code quality:
+- No `testify` assertions—use standard library
+- No external mocking libraries—hand-roll mocks per test
+- No global state (except `log.Logger`)
+- No `init` functions—enforced by `gochecknoinits` linter
+</Warning>
+
+These constraints encourage explicit dependencies, testable code, and predictable behavior.
+
+## Next Steps
+
+<Steps>
+  <Step title="Install Platforma">
+    Add Platforma to your Go project with `go get`
+  </Step>
+  <Step title="Build Your First Server">
+    Follow the quickstart guide to create a working HTTP server
+  </Step>
+  <Step title="Learn the Architecture">
+    Understand domains, services, and lifecycle management
+  </Step>
+  <Step title="Explore Examples">
+    Check out the demo-app for real-world usage patterns
+  </Step>
+</Steps>
+
+<Card title="Ready to build?" icon="rocket" href="/installation">
+  Install Platforma and create your first application
+</Card>

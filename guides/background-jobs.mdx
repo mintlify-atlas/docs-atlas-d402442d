@@ -1,0 +1,323 @@
+---
+title: Background Jobs
+description: Process asynchronous tasks using typed job handlers and worker pools in Platforma
+---
+
+Platforma's queue system provides a robust way to process background jobs using typed handlers, worker pools, and graceful shutdown semantics.
+
+## Overview
+
+The queue package provides three main abstractions:
+
+- **Processor**: Manages a pool of workers that process jobs
+- **Handler**: Defines how to process jobs of a specific type
+- **Provider**: Abstracts the underlying queue implementation (Redis, RabbitMQ, etc.)
+
+## Handler Interface
+
+Implement the `Handler[T]` interface to define job processing logic:
+
+```go
+type Handler[T any] interface {
+	Handle(ctx context.Context, job T)
+}
+```
+
+The handler is type-safe - you define the job type and the processor ensures type checking at compile time.
+
+## Creating a Handler
+
+### Using a Struct
+
+```go
+type EmailJob struct {
+	To      string
+	Subject string
+	Body    string
+}
+
+type EmailHandler struct {
+	smtp *smtp.Client
+}
+
+func (h *EmailHandler) Handle(ctx context.Context, job EmailJob) {
+	log.InfoContext(ctx, "sending email", "to", job.To)
+
+	err := h.smtp.SendMail(job.To, job.Subject, job.Body)
+	if err != nil {
+		log.ErrorContext(ctx, "failed to send email", "error", err)
+		return
+	}
+
+	log.InfoContext(ctx, "email sent successfully")
+}
+```
+
+### Using a Function
+
+For simple handlers, use `HandlerFunc[T]`:
+
+```go
+handler := queue.HandlerFunc[EmailJob](func(ctx context.Context, job EmailJob) {
+	log.InfoContext(ctx, "processing email", "to", job.To)
+	// Process the job...
+})
+```
+
+## Provider Interface
+
+The `Provider[T]` interface abstracts the queue implementation:
+
+```go
+type Provider[T any] interface {
+	Open(ctx context.Context) error
+	Close(ctx context.Context) error
+	EnqueueJob(ctx context.Context, job T) error
+	GetJobChan(ctx context.Context) (chan T, error)
+}
+```
+
+You need to implement a provider for your chosen queue backend (Redis, RabbitMQ, in-memory, etc.).
+
+## Creating a Processor
+
+Create a processor with your handler, provider, and configuration:
+
+```go
+import (
+	"time"
+	"github.com/platforma-dev/platforma/queue"
+)
+
+handler := &EmailHandler{smtp: smtpClient}
+provider := NewRedisProvider[EmailJob](redisClient)
+
+processor := queue.New(
+	handler,
+	provider,
+	10,                  // Number of workers
+	30*time.Second,      // Shutdown timeout
+)
+```
+
+## Enqueuing Jobs
+
+Add jobs to the queue using the `Enqueue` method:
+
+```go
+job := EmailJob{
+	To:      "user@example.com",
+	Subject: "Welcome!",
+	Body:    "Thanks for signing up.",
+}
+
+err := processor.Enqueue(ctx, job)
+if err != nil {
+	log.ErrorContext(ctx, "failed to enqueue job", "error", err)
+	return err
+}
+```
+
+The `Enqueue` method is type-safe - the compiler ensures you only enqueue jobs matching the processor's type.
+
+## Running the Processor
+
+Start the processor to begin processing jobs:
+
+```go
+err := processor.Run(ctx)
+if err != nil {
+	return fmt.Errorf("processor failed: %w", err)
+}
+```
+
+The `Run` method:
+
+1. Opens the queue provider connection
+2. Starts the configured number of worker goroutines
+3. Blocks until the context is cancelled
+4. Performs graceful shutdown
+5. Closes the provider connection
+
+## Worker Pools
+
+The processor manages a pool of concurrent workers. Each worker:
+
+- Runs in its own goroutine
+- Has a unique worker ID in the context (`log.WorkerIDKey`)
+- Processes jobs from a shared channel
+- Recovers from panics and logs them
+- Participates in graceful shutdown
+
+```go
+processor := queue.New(
+	handler,
+	provider,
+	5,  // 5 concurrent workers
+	30*time.Second,
+)
+```
+
+## Graceful Shutdown
+
+When the context is cancelled, the processor performs graceful shutdown:
+
+<Steps>
+  <Step title="Stop accepting new jobs">
+    Workers check `ctx.Done()` before accepting new jobs from the channel.
+  </Step>
+
+  <Step title="Drain remaining jobs">
+    Workers continue processing jobs already in the channel until the shutdown timeout expires.
+    ```go
+    processor := queue.New(
+      handler,
+      provider,
+      10,
+      30*time.Second,  // Workers have 30s to finish remaining jobs
+    )
+    ```
+  </Step>
+
+  <Step title="Log shutdown progress">
+    Workers log when they detect shutdown, when they finish draining, and when timeout expires:
+    ```
+    shutting down worker
+    shutdown timeout expired
+    worker finished
+    all workers shut down
+    ```
+  </Step>
+</Steps>
+
+## Context-Aware Logging
+
+Each worker has a unique worker ID injected into the context:
+
+```go
+workerCtx := context.WithValue(ctx, log.WorkerIDKey, uuid.NewString())
+```
+
+This allows you to trace job processing across logs:
+
+```go
+func (h *EmailHandler) Handle(ctx context.Context, job EmailJob) {
+	log.InfoContext(ctx, "starting email send")  // Includes workerId
+	// Process job...
+	log.InfoContext(ctx, "email sent")  // Same workerId
+}
+```
+
+## Complete Example
+
+<CodeGroup>
+```go Handler Implementation
+package main
+
+import (
+	"context"
+	"github.com/platforma-dev/platforma/log"
+)
+
+type NotificationJob struct {
+	UserID  string
+	Message string
+}
+
+type NotificationHandler struct {
+	notifier *Notifier
+}
+
+func (h *NotificationHandler) Handle(ctx context.Context, job NotificationJob) {
+	log.InfoContext(ctx, "processing notification",
+		"user_id", job.UserID,
+	)
+
+	err := h.notifier.Send(ctx, job.UserID, job.Message)
+	if err != nil {
+		log.ErrorContext(ctx, "notification failed", "error", err)
+		return
+	}
+
+	log.InfoContext(ctx, "notification sent successfully")
+}
+```
+
+```go Application Setup
+package main
+
+import (
+	"context"
+	"time"
+	"github.com/platforma-dev/platforma/queue"
+)
+
+func main() {
+	ctx := context.Background()
+
+	// Create handler and provider
+	handler := &NotificationHandler{
+		notifier: NewNotifier(),
+	}
+	provider := NewRedisProvider[NotificationJob](redisClient)
+
+	// Create processor
+	processor := queue.New(
+		handler,
+		provider,
+		10,                 // 10 workers
+		30*time.Second,     // 30s shutdown timeout
+	)
+
+	// Enqueue jobs
+	job := NotificationJob{
+		UserID:  "user123",
+		Message: "Your order has shipped!",
+	}
+	if err := processor.Enqueue(ctx, job); err != nil {
+		panic(err)
+	}
+
+	// Start processing
+	if err := processor.Run(ctx); err != nil {
+		panic(err)
+	}
+}
+```
+</CodeGroup>
+
+## Error Handling
+
+Handlers should handle errors internally - the `Handle` method doesn't return an error. Log errors using the context-aware logger:
+
+```go
+func (h *Handler) Handle(ctx context.Context, job MyJob) {
+	err := h.process(job)
+	if err != nil {
+		log.ErrorContext(ctx, "job failed", "error", err, "job_id", job.ID)
+		// Optionally: re-enqueue, send to DLQ, etc.
+		return
+	}
+	log.InfoContext(ctx, "job completed")
+}
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Make handlers idempotent" icon="rotate">
+    Jobs may be processed more than once due to failures. Design handlers to be safe when re-run.
+  </Card>
+
+  <Card title="Use appropriate worker counts" icon="users">
+    Match worker count to job characteristics: CPU-bound (1x cores), I/O-bound (10-100+).
+  </Card>
+
+  <Card title="Set reasonable timeouts" icon="clock">
+    Shutdown timeout should exceed typical job duration to avoid cutting off work.
+  </Card>
+
+  <Card title="Log liberally with context" icon="list">
+    Use `InfoContext` and `ErrorContext` to maintain correlation via worker IDs.
+  </Card>
+</CardGroup>

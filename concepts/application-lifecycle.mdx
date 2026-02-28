@@ -1,0 +1,359 @@
+---
+title: Application Lifecycle
+description: Bootstrap, configure, and run your Platforma application
+---
+
+The `Application` type manages the complete lifecycle of your application, from startup tasks through graceful shutdown.
+
+## Application Type
+
+Defined in `application/application.go:36`, the `Application` coordinates:
+
+- **Startup tasks** - Run sequentially before services start
+- **Services** - Long-running processes (HTTP servers, queue processors)
+- **Databases** - Database connections with migration support
+- **Health checks** - Service health monitoring
+
+```go
+type Application struct {
+    startupTasks   []startupTask
+    services       map[string]Runner
+    healthcheckers map[string]Healthchecker
+    databases      map[string]*database.Database
+    health         *Health
+}
+```
+
+## Basic Setup
+
+Create and run an application:
+
+```go
+package main
+
+import (
+    "context"
+    "github.com/platforma-dev/platforma/application"
+)
+
+func main() {
+    ctx := context.Background()
+    
+    // Create new application
+    app := application.New()
+    
+    // Register components...
+    
+    // Run with CLI argument parsing
+    if err := app.Run(ctx); err != nil {
+        log.ErrorContext(ctx, "app failed", "error", err)
+    }
+}
+```
+
+<Info>
+`app.Run(ctx)` automatically parses command-line arguments. Run with `run` command to start services or `migrate` to run database migrations.
+</Info>
+
+## Registration Methods
+
+### RegisterDatabase
+
+Register a database connection defined in `application/application.go:68`:
+
+```go
+db := database.New(connString)
+app.RegisterDatabase("main", db)
+```
+
+Databases are automatically migrated during the `migrate` command.
+
+### RegisterDomain
+
+Register a domain and its repository from `application/application.go:90`:
+
+```go
+app.RegisterDomain(
+    "auth",           // domain name
+    "main",          // database name
+    authDomain,      // domain implementing Domain interface
+)
+```
+
+This automatically registers the domain's repository with the specified database for migration tracking.
+
+### RegisterService
+
+Register a long-running service from `application/application.go:78`:
+
+```go
+app.RegisterService("api", httpServer)
+app.RegisterService("queue_processor", processor)
+app.RegisterService("scheduler", scheduler)
+```
+
+Services must implement the `Runner` interface:
+
+```go
+type Runner interface {
+    Run(context.Context) error
+}
+```
+
+<Tip>
+Services implementing `Healthchecker` are automatically registered for health monitoring.
+</Tip>
+
+### RegisterRepository
+
+Directly register a repository from `application/application.go:73`:
+
+```go
+app.RegisterRepository("main", "users_repo", userRepository)
+```
+
+Usually not needed - `RegisterDomain()` handles this automatically.
+
+## Startup Tasks
+
+Run initialization logic before services start using `application/application.go:58`:
+
+```go
+app.OnStartFunc(
+    func(ctx context.Context) error {
+        log.InfoContext(ctx, "seeding database")
+        return seedDatabase(ctx)
+    },
+    application.StartupTaskConfig{
+        Name:         "seed_database",
+        AbortOnError: true,  // Stop app if this fails
+    },
+)
+```
+
+### Startup Task Configuration
+
+From `application/startuptask.go:21`:
+
+```go
+type StartupTaskConfig struct {
+    Name         string  // Task name for logging
+    AbortOnError bool    // Whether to stop app on failure
+}
+```
+
+<Warning>
+Startup tasks run **sequentially** in registration order. If `AbortOnError` is true, a failure prevents service startup.
+</Warning>
+
+## Complete Lifecycle Example
+
+From `demo-app/cmd/api/main.go`, showing the full application setup:
+
+```go
+package main
+
+import (
+    "context"
+    "net/http"
+    "time"
+
+    "github.com/platforma-dev/platforma/application"
+    "github.com/platforma-dev/platforma/httpserver"
+    "github.com/platforma-dev/platforma/log"
+)
+
+func main() {
+    ctx := context.Background()
+
+    // Initialize application
+    app := application.New()
+
+    // Create HTTP server
+    api := httpserver.New("8080", 3*time.Second)
+
+    // Add endpoints
+    api.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
+        w.Write([]byte("pong"))
+    })
+
+    // Add middleware
+    api.Use(log.NewTraceIDMiddleware(nil, ""))
+
+    // Create handler group
+    subApiGroup := httpserver.NewHandlerGroup()
+    subApiGroup.HandleFunc("/clock", func(w http.ResponseWriter, r *http.Request) {
+        w.Write([]byte(time.Now().String()))
+    })
+
+    // Mount handler group
+    api.HandleGroup("/subApi", subApiGroup)
+
+    // Register HTTP server as service
+    app.RegisterService("api", api)
+
+    // Run application
+    if err := app.Run(ctx); err != nil {
+        log.ErrorContext(ctx, "app finished with error", "error", err)
+    }
+}
+```
+
+## CLI Commands
+
+The `Run` method from `application/application.go:180` supports these commands:
+
+<Tabs>
+  <Tab title="run">
+    Starts all registered services:
+    
+    ```bash
+    ./myapp run
+    ```
+    
+    - Executes startup tasks sequentially
+    - Starts all services concurrently
+    - Waits for interrupt signal (Ctrl+C)
+    - Performs graceful shutdown
+  </Tab>
+  
+  <Tab title="migrate">
+    Runs database migrations:
+    
+    ```bash
+    ./myapp migrate
+    ```
+    
+    - Executes migrations for all registered databases
+    - Applies pending migrations in order
+    - Does not start services
+  </Tab>
+  
+  <Tab title="--help">
+    Shows usage information:
+    
+    ```bash
+    ./myapp --help
+    ```
+  </Tab>
+</Tabs>
+
+## Service Lifecycle
+
+When you run `./myapp run`, the application:
+
+1. **Runs startup tasks** (application/application.go:129) - Sequential execution
+2. **Starts services** (application/application.go:146) - Concurrent goroutines with panic recovery
+3. **Updates health status** (application/application.go:160) - Tracks service state
+4. **Waits for shutdown** (application/application.go:124) - Listens for OS signals
+5. **Graceful shutdown** - Services receive context cancellation
+
+```go
+// Service execution from application.go:146-168
+for serviceName, service := range a.services {
+    wg.Add(1)
+    serviceCtx := context.WithValue(ctx, log.ServiceNameKey, serviceName)
+    
+    go func() {
+        defer wg.Done()
+        defer func() {
+            if r := recover(); r != nil {
+                log.ErrorContext(serviceCtx, "service panicked", 
+                    "panic", r)
+            }
+        }()
+        
+        log.InfoContext(ctx, "starting service", "service", serviceName)
+        a.health.StartService(serviceName)
+        
+        err := service.Run(serviceCtx)
+        if err != nil {
+            a.health.FailService(serviceName, err)
+            log.ErrorContext(ctx, "error in service", "error", err)
+        }
+    }()
+}
+```
+
+<Check>
+Services receive a context that's cancelled on shutdown. Implement graceful shutdown by monitoring `ctx.Done()`.
+</Check>
+
+## Graceful Shutdown
+
+The application handles `SIGINT` and `SIGKILL` signals (application/application.go:124):
+
+```go
+ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, os.Kill)
+defer cancel()
+```
+
+Services should respect context cancellation:
+
+```go
+func (s *MyService) Run(ctx context.Context) error {
+    for {
+        select {
+        case <-ctx.Done():
+            log.InfoContext(ctx, "shutting down gracefully")
+            return nil
+        case work := <-s.workChan:
+            s.process(work)
+        }
+    }
+}
+```
+
+<Tip>
+The `HTTPServer` automatically implements graceful shutdown with a configurable timeout.
+</Tip>
+
+## Error Handling
+
+Specialized errors from the application package:
+
+```go
+// Startup task failure (application/startuptask.go:6)
+type ErrStartupTaskFailed struct {
+    err error
+}
+
+// Database migration failure (application/application.go:21)
+type ErrDatabaseMigrationFailed struct {
+    err error
+}
+
+// Unknown CLI command (application/application.go:18)
+var ErrUnknownCommand = errors.New("unknown command")
+```
+
+## Health Monitoring
+
+Access health status via `application/application.go:50`:
+
+```go
+health := app.Health(ctx)
+// Returns *Health with service status and health check data
+```
+
+Services implementing `Healthchecker` provide custom health data:
+
+```go
+type Healthchecker interface {
+    Healthcheck(context.Context) any
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Domains" icon="layer-group" href="/concepts/domains">
+    Learn how to create and structure domains
+  </Card>
+  <Card title="HTTP Routing" icon="route" href="/concepts/http-routing">
+    Set up HTTP servers and routes
+  </Card>
+  <Card title="Database" icon="database" href="/guides/database-migrations">
+    Configure databases and migrations
+  </Card>
+</CardGroup>

@@ -1,0 +1,297 @@
+---
+title: "Application"
+description: "Core application lifecycle management for Platforma"
+---
+
+The `application` package provides the core Application type that manages startup tasks, services, databases, and health checks throughout your application's lifecycle.
+
+## Application Type
+
+The `Application` type orchestrates the lifecycle of your application, managing startup tasks, services, databases, and health monitoring.
+
+```go
+type Application struct {
+    // Contains startup tasks, services, healthcheckers, and databases
+}
+```
+
+### Constructor
+
+<ParamField path="New()" type="*Application">
+  Creates and returns a new Application instance.
+  
+  ```go
+  app := application.New()
+  ```
+</ParamField>
+
+## Methods
+
+### RegisterService
+
+<ParamField path="RegisterService(serviceName string, service Runner)" type="void">
+  Registers a named service with the application. Services are started concurrently when the application runs.
+  
+  ```go
+  httpServer := httpserver.New("8080", 3*time.Second)
+  app.RegisterService("api", httpServer)
+  ```
+</ParamField>
+
+### RegisterDatabase
+
+<ParamField path="RegisterDatabase(dbName string, db *database.Database)" type="void">
+  Adds a database to the application for lifecycle management.
+  
+  ```go
+  db, err := database.New(connStr)
+  if err != nil {
+      log.Fatal(err)
+  }
+  app.RegisterDatabase("main", db)
+  ```
+</ParamField>
+
+### RegisterRepository
+
+<ParamField path="RegisterRepository(dbName string, repoName string, repository any)" type="void">
+  Registers a repository with a specific database. Repositories implementing the migrator interface will have their migrations applied.
+  
+  ```go
+  userRepo := NewUserRepository(db.Connection())
+  app.RegisterRepository("main", "users", userRepo)
+  ```
+</ParamField>
+
+### RegisterDomain
+
+<ParamField path="RegisterDomain(name, dbName string, domain Domain)" type="void">
+  Registers a domain repository in the specified database. The domain must implement the Domain interface.
+  
+  ```go
+  authDomain := auth.NewDomain(db.Connection())
+  app.RegisterDomain("auth", "main", authDomain)
+  ```
+</ParamField>
+
+### OnStart
+
+<ParamField path="OnStart(task Runner, config StartupTaskConfig)" type="void">
+  Registers a startup task that runs before services start.
+  
+  ```go
+  app.OnStart(migrationTask, application.StartupTaskConfig{
+      Name:         "database_migration",
+      AbortOnError: true,
+  })
+  ```
+</ParamField>
+
+### OnStartFunc
+
+<ParamField path="OnStartFunc(task RunnerFunc, config StartupTaskConfig)" type="void">
+  Registers a startup task using a function.
+  
+  ```go
+  app.OnStartFunc(func(ctx context.Context) error {
+      log.InfoContext(ctx, "initializing application")
+      return nil
+  }, application.StartupTaskConfig{
+      Name:         "init",
+      AbortOnError: false,
+  })
+  ```
+</ParamField>
+
+### Health
+
+<ParamField path="Health(ctx context.Context)" type="*Health">
+  Returns the current health status of the application and all registered services.
+  
+  ```go
+  health := app.Health(ctx)
+  // Returns health status including service states
+  ```
+</ParamField>
+
+### Run
+
+<ParamField path="Run(ctx context.Context)" type="error">
+  Parses CLI arguments and executes the appropriate command.
+  
+  **Supported commands:**
+  - `run` - Starts all registered services
+  - `migrate` - Runs database migrations
+  - `--help`, `-h` - Displays usage information
+  
+  Returns `ErrUnknownCommand` if an unknown command is provided.
+  
+  ```go
+  if err := app.Run(ctx); err != nil {
+      log.ErrorContext(ctx, "app failed", "error", err)
+  }
+  ```
+</ParamField>
+
+## Interfaces
+
+### Runner
+
+The Runner interface defines tasks that can be executed with context.
+
+```go
+type Runner interface {
+    Run(context.Context) error
+}
+```
+
+<ResponseField name="Run" type="func(context.Context) error">
+  Executes the task with the given context and returns an error if any.
+</ResponseField>
+
+#### RunnerFunc
+
+A function type that implements the Runner interface.
+
+```go
+type RunnerFunc func(context.Context) error
+
+func (rf RunnerFunc) Run(ctx context.Context) error {
+    return rf(ctx)
+}
+```
+
+### Domain
+
+The Domain interface describes a domain module that exposes its repository.
+
+```go
+type Domain interface {
+    GetRepository() any
+}
+```
+
+<ResponseField name="GetRepository" type="func() any">
+  Returns the repository associated with this domain.
+</ResponseField>
+
+### Healthchecker
+
+Represents a service that can perform health checks.
+
+```go
+type Healthchecker interface {
+    Healthcheck(context.Context) any
+}
+```
+
+<ResponseField name="Healthcheck" type="func(context.Context) any">
+  Returns the health status of the service. The returned value can be any serializable type.
+</ResponseField>
+
+## Types
+
+### StartupTaskConfig
+
+Configuration options for a startup task.
+
+```go
+type StartupTaskConfig struct {
+    Name         string // Name of the startup task
+    AbortOnError bool   // Whether to abort application startup if this task fails
+}
+```
+
+<ResponseField name="Name" type="string">
+  Name of the startup task for logging and identification.
+</ResponseField>
+
+<ResponseField name="AbortOnError" type="bool">
+  If true, the application will terminate if this startup task fails. If false, the error is logged and execution continues.
+</ResponseField>
+
+## Errors
+
+### ErrUnknownCommand
+
+```go
+var ErrUnknownCommand = errors.New("unknown command")
+```
+
+Returned when an unknown CLI command is provided to `Run()`.
+
+### ErrDatabaseMigrationFailed
+
+```go
+type ErrDatabaseMigrationFailed struct {
+    err error
+}
+```
+
+Returned when database migration fails during the `migrate` command.
+
+### ErrStartupTaskFailed
+
+```go
+type ErrStartupTaskFailed struct {
+    err error
+}
+```
+
+Returned when a startup task with `AbortOnError: true` fails.
+
+## Example Usage
+
+```go
+package main
+
+import (
+    "context"
+    "time"
+    "github.com/platforma-dev/platforma/application"
+    "github.com/platforma-dev/platforma/httpserver"
+    "github.com/platforma-dev/platforma/log"
+)
+
+func main() {
+    ctx := context.Background()
+    
+    // Create application
+    app := application.New()
+    
+    // Create and register HTTP server
+    api := httpserver.New("8080", 3*time.Second)
+    api.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+        health := app.Health(r.Context())
+        json.NewEncoder(w).Encode(health)
+    })
+    app.RegisterService("api", api)
+    
+    // Add startup task
+    app.OnStartFunc(func(ctx context.Context) error {
+        log.InfoContext(ctx, "application initialized")
+        return nil
+    }, application.StartupTaskConfig{
+        Name:         "init",
+        AbortOnError: false,
+    })
+    
+    // Run application (handles CLI commands)
+    if err := app.Run(ctx); err != nil {
+        log.ErrorContext(ctx, "app error", "error", err)
+    }
+}
+```
+
+**CLI Usage:**
+
+```bash
+# Start the application
+./myapp run
+
+# Run database migrations
+./myapp migrate
+
+# Show help
+./myapp --help
+```

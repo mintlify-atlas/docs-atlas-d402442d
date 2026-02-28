@@ -1,0 +1,534 @@
+---
+title: Middleware
+description: Create and apply HTTP middleware for request processing
+---
+
+Middleware in Platforma wraps HTTP handlers to add cross-cutting concerns like authentication, logging, tracing, and request validation.
+
+## Middleware Interface
+
+From `httpserver/middleware.go:9`, middleware implements a simple interface:
+
+```go
+type Middleware interface {
+    // Wrap wraps an http.Handler with middleware logic
+    Wrap(http.Handler) http.Handler
+}
+```
+
+Any type with a `Wrap` method can be used as middleware.
+
+## MiddlewareFunc
+
+For simple middleware, use the `MiddlewareFunc` convenience type from `httpserver/middleware.go:15`:
+
+```go
+type MiddlewareFunc func(http.Handler) http.Handler
+
+func (f MiddlewareFunc) Wrap(h http.Handler) http.Handler {
+    return f(h)
+}
+```
+
+This lets you pass functions directly as middleware:
+
+```go
+middleware := httpserver.MiddlewareFunc(func(h http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        // Middleware logic
+        h.ServeHTTP(w, r)
+    })
+})
+```
+
+## Creating Middleware
+
+### Basic Pattern
+
+Middleware follows this structure:
+
+```go
+func MyMiddleware(h http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        // Before the handler runs
+        
+        h.ServeHTTP(w, r)  // Call the next handler
+        
+        // After the handler runs
+    })
+}
+```
+
+### Example: Request Logging
+
+From `demo-app/cmd/api/main.go:45`, inline middleware for logging:
+
+```go
+subApiGroup.UseFunc(func(h http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        log.InfoContext(r.Context(), "incoming request", "addr", r.RemoteAddr)
+        h.ServeHTTP(w, r)
+    })
+})
+```
+
+### Example: TraceID Middleware
+
+Real implementation from `log/traceid.go:11`:
+
+```go
+package log
+
+import (
+    "context"
+    "net/http"
+    "github.com/google/uuid"
+)
+
+type TraceIDMiddleware struct {
+    contextKey any
+    header     string
+}
+
+func NewTraceIDMiddleware(contextKey any, header string) *TraceIDMiddleware {
+    if contextKey == nil {
+        contextKey = TraceIDKey
+    }
+    if header == "" {
+        header = "Platforma-Trace-Id"
+    }
+    return &TraceIDMiddleware{
+        contextKey: contextKey,
+        header:     header,
+    }
+}
+
+func (m *TraceIDMiddleware) Wrap(h http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        // Generate trace ID
+        traceID := uuid.NewString()
+        
+        // Add to context
+        ctx := context.WithValue(r.Context(), m.contextKey, traceID)
+        r = r.WithContext(ctx)
+        
+        // Add to response header
+        w.Header().Set(m.header, traceID)
+        
+        // Call next handler
+        h.ServeHTTP(w, r)
+    })
+}
+```
+
+Usage from `demo-app/cmd/api/main.go:34`:
+
+```go
+api.Use(log.NewTraceIDMiddleware(nil, ""))
+```
+
+<Check>
+This middleware generates a unique trace ID for each request, adds it to the response headers, and makes it available in the request context for logging.
+</Check>
+
+## Applying Middleware
+
+### Use() - Apply Middleware
+
+From `httpserver/handlergroup.go:19`, apply middleware to a server or group:
+
+```go
+// Apply to entire server
+api := httpserver.New("8080", 5*time.Second)
+api.Use(loggingMiddleware)
+api.Use(authMiddleware)
+
+// Apply to handler group
+adminAPI := httpserver.NewHandlerGroup()
+adminAPI.Use(adminAuthMiddleware)
+adminAPI.Use(auditMiddleware)
+```
+
+### UseFunc() - Apply Function Middleware
+
+From `httpserver/handlergroup.go:24`, for inline middleware:
+
+```go
+api.UseFunc(func(h http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        // Middleware logic
+        h.ServeHTTP(w, r)
+    })
+})
+```
+
+### Wrap() - Apply to Single Handler
+
+From `auth/domain.go:27`, wrap individual handlers:
+
+```go
+// Protect specific handlers
+changePasswordHandler := authMiddleware.Wrap(NewChangePasswordHandler(service))
+deleteHandler := authMiddleware.Wrap(NewDeleteHandler(service))
+
+// Unprotected handler
+loginHandler := NewLoginHandler(service)
+```
+
+## Middleware Execution Order
+
+Middleware is applied in **reverse order** from `httpserver/middleware.go:26`:
+
+```go
+func wrapHandlerInMiddleware(handler http.Handler, middlewares []Middleware) http.Handler {
+    finalHandler := handler
+    for _, middleware := range slices.Backward(middlewares) {
+        finalHandler = middleware.Wrap(finalHandler)
+    }
+    return finalHandler
+}
+```
+
+<Warning>
+The **first registered** middleware is the **outermost** wrapper.
+</Warning>
+
+Example:
+
+```go
+api.Use(traceIDMiddleware)   // 1st registered - outermost
+api.Use(loggingMiddleware)   // 2nd
+api.Use(authMiddleware)      // 3rd registered - innermost
+api.Handle("GET /users", handler)
+```
+
+Execution flow:
+1. Request enters `traceIDMiddleware`
+2. Passes to `loggingMiddleware`
+3. Passes to `authMiddleware`
+4. Reaches `handler`
+5. Response flows back through auth → logging → traceID
+
+## Common Middleware Patterns
+
+### Authentication
+
+Check for valid credentials and inject user into context:
+
+```go
+type AuthMiddleware struct {
+    authService AuthService
+}
+
+func (m *AuthMiddleware) Wrap(h http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        // Get session from cookie
+        cookie, err := r.Cookie("session")
+        if err != nil {
+            http.Error(w, "unauthorized", http.StatusUnauthorized)
+            return
+        }
+        
+        // Validate session
+        user, err := m.authService.GetUserBySession(r.Context(), cookie.Value)
+        if err != nil {
+            http.Error(w, "unauthorized", http.StatusUnauthorized)
+            return
+        }
+        
+        // Add user to context
+        ctx := context.WithValue(r.Context(), userContextKey, user)
+        r = r.WithContext(ctx)
+        
+        h.ServeHTTP(w, r)
+    })
+}
+```
+
+### Request Timing
+
+Measure request duration:
+
+```go
+func TimingMiddleware(h http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        start := time.Now()
+        
+        h.ServeHTTP(w, r)
+        
+        duration := time.Since(start)
+        log.InfoContext(r.Context(), "request completed",
+            "duration", duration,
+            "path", r.URL.Path,
+        )
+    })
+}
+```
+
+### Error Recovery
+
+Recover from panics:
+
+```go
+func RecoveryMiddleware(h http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        defer func() {
+            if err := recover(); err != nil {
+                log.ErrorContext(r.Context(), "handler panicked",
+                    "error", err,
+                    "path", r.URL.Path,
+                )
+                http.Error(w, "internal server error", 
+                    http.StatusInternalServerError)
+            }
+        }()
+        
+        h.ServeHTTP(w, r)
+    })
+}
+```
+
+### CORS Headers
+
+Add cross-origin resource sharing headers:
+
+```go
+func CORSMiddleware(allowedOrigin string) httpserver.Middleware {
+    return httpserver.MiddlewareFunc(func(h http.Handler) http.Handler {
+        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+            w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE")
+            w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+            
+            // Handle preflight
+            if r.Method == "OPTIONS" {
+                w.WriteHeader(http.StatusOK)
+                return
+            }
+            
+            h.ServeHTTP(w, r)
+        })
+    })
+}
+```
+
+### Request ID Injection
+
+Similar to TraceID, but from header if present:
+
+```go
+func RequestIDMiddleware(h http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        // Try to get from header
+        requestID := r.Header.Get("X-Request-ID")
+        if requestID == "" {
+            requestID = uuid.NewString()
+        }
+        
+        // Add to context
+        ctx := context.WithValue(r.Context(), requestIDKey, requestID)
+        r = r.WithContext(ctx)
+        
+        // Echo back in response
+        w.Header().Set("X-Request-ID", requestID)
+        
+        h.ServeHTTP(w, r)
+    })
+}
+```
+
+## Middleware with Configuration
+
+Create configurable middleware using constructors:
+
+```go
+type RateLimitMiddleware struct {
+    requestsPerMinute int
+    limiter           *rate.Limiter
+}
+
+func NewRateLimitMiddleware(requestsPerMinute int) *RateLimitMiddleware {
+    return &RateLimitMiddleware{
+        requestsPerMinute: requestsPerMinute,
+        limiter:           rate.NewLimiter(rate.Limit(requestsPerMinute), requestsPerMinute),
+    }
+}
+
+func (m *RateLimitMiddleware) Wrap(h http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        if !m.limiter.Allow() {
+            http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+            return
+        }
+        h.ServeHTTP(w, r)
+    })
+}
+```
+
+Usage:
+
+```go
+rateLimiter := NewRateLimitMiddleware(100)
+api.Use(rateLimiter)
+```
+
+## Context-Based Middleware
+
+Pass values through request context:
+
+```go
+type contextKey string
+
+const userKey contextKey = "user"
+
+// Set in middleware
+func SetUser(ctx context.Context, user *User) context.Context {
+    return context.WithValue(ctx, userKey, user)
+}
+
+// Get in handler
+func GetUser(ctx context.Context) (*User, bool) {
+    user, ok := ctx.Value(userKey).(*User)
+    return user, ok
+}
+
+// Middleware
+func (m *AuthMiddleware) Wrap(h http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        user := m.authenticate(r)
+        ctx := SetUser(r.Context(), user)
+        r = r.WithContext(ctx)
+        h.ServeHTTP(w, r)
+    })
+}
+
+// Handler
+func MyHandler(w http.ResponseWriter, r *http.Request) {
+    user, ok := GetUser(r.Context())
+    if !ok {
+        http.Error(w, "unauthorized", http.StatusUnauthorized)
+        return
+    }
+    // Use user...
+}
+```
+
+## Conditional Middleware
+
+Apply middleware based on conditions:
+
+```go
+func ConditionalAuthMiddleware(publicPaths []string) httpserver.Middleware {
+    return httpserver.MiddlewareFunc(func(h http.Handler) http.Handler {
+        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            // Skip auth for public paths
+            for _, path := range publicPaths {
+                if r.URL.Path == path {
+                    h.ServeHTTP(w, r)
+                    return
+                }
+            }
+            
+            // Require auth for other paths
+            if !isAuthenticated(r) {
+                http.Error(w, "unauthorized", http.StatusUnauthorized)
+                return
+            }
+            
+            h.ServeHTTP(w, r)
+        })
+    })
+}
+```
+
+## Combining Middleware
+
+Chain multiple middleware together:
+
+```go
+// Create a combined middleware stack
+func StandardMiddleware() []httpserver.Middleware {
+    return []httpserver.Middleware{
+        log.NewTraceIDMiddleware(nil, ""),
+        RecoveryMiddleware,
+        LoggingMiddleware,
+    }
+}
+
+// Apply to server
+api := httpserver.New("8080", 5*time.Second)
+for _, mw := range StandardMiddleware() {
+    api.Use(mw)
+}
+```
+
+## Testing Middleware
+
+Test middleware in isolation:
+
+```go
+func TestAuthMiddleware(t *testing.T) {
+    // Create test handler
+    testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.WriteHeader(http.StatusOK)
+        w.Write([]byte("success"))
+    })
+    
+    // Wrap with middleware
+    middleware := NewAuthMiddleware(mockAuthService)
+    wrappedHandler := middleware.Wrap(testHandler)
+    
+    // Create test request
+    req := httptest.NewRequest("GET", "/test", nil)
+    req.AddCookie(&http.Cookie{Name: "session", Value: "valid-token"})
+    
+    // Record response
+    rec := httptest.NewRecorder()
+    
+    // Execute
+    wrappedHandler.ServeHTTP(rec, req)
+    
+    // Assert
+    if rec.Code != http.StatusOK {
+        t.Errorf("expected status 200, got %d", rec.Code)
+    }
+}
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Order Matters">
+    Place middleware that sets context values (like trace ID, user) **before** middleware that uses those values (like logging).
+  </Accordion>
+  
+  <Accordion title="Always Call Next">
+    Unless you're intentionally short-circuiting the request (auth failure, rate limit), always call `h.ServeHTTP(w, r)`.
+  </Accordion>
+  
+  <Accordion title="Don't Modify Request Body">
+    Reading `r.Body` consumes it. If you need to inspect the body, create a copy first using `io.TeeReader`.
+  </Accordion>
+  
+  <Accordion title="Keep Middleware Focused">
+    Each middleware should do one thing well. Compose multiple middleware instead of creating monolithic ones.
+  </Accordion>
+  
+  <Accordion title="Use Types for Configuration">
+    Create a struct type for middleware with configuration rather than passing many parameters.
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="HTTP Routing" icon="route" href="/concepts/http-routing">
+    Learn how to apply middleware to routes and groups
+  </Card>
+  <Card title="Domains" icon="layer-group" href="/concepts/domains">
+    See how middleware fits into domain architecture
+  </Card>
+  <Card title="Logging" icon="file-lines" href="/guides/logging">
+    Use context-aware logging in middleware
+  </Card>
+</CardGroup>

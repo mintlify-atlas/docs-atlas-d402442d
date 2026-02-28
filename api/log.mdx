@@ -1,0 +1,367 @@
+---
+title: "Logger"
+description: "Structured logging with context support"
+---
+
+The `log` package provides structured logging functionality with context support, built on top of Go's standard `log/slog` package.
+
+## Logger Overview
+
+Platforma's logger automatically extracts and logs context values like trace IDs, service names, and user IDs. It supports both JSON and text output formats with structured key-value pairs.
+
+## Global Logger
+
+The package provides a default global logger:
+
+```go
+var Logger logger = New(os.Stdout, "text", slog.LevelInfo, nil)
+```
+
+### SetDefault
+
+<ParamField path="SetDefault(l logger)" type="void">
+  Sets the default logger used by package-level logging functions.
+  
+  ```go
+  customLogger := log.New(os.Stdout, "json", slog.LevelDebug, nil)
+  log.SetDefault(customLogger)
+  ```
+</ParamField>
+
+## Creating Loggers
+
+### New
+
+<ParamField path="New(w, loggerType, level, contextKeys)" type="*slog.Logger">
+  Creates a new slog.Logger with the specified configuration.
+  
+  **Parameters:**
+  - `w` (io.Writer): Output destination (e.g., os.Stdout, file)
+  - `loggerType` (string): Logger format - "json" or "text"
+  - `level` (slog.Level): Minimum log level (LevelDebug, LevelInfo, LevelWarn, LevelError)
+  - `contextKeys` (map[string]any): Additional context keys to extract from context
+  
+  ```go
+  logger := log.New(os.Stdout, "json", slog.LevelInfo, nil)
+  ```
+</ParamField>
+
+## Logging Methods
+
+The logger provides both context-aware and simple logging methods. **Always prefer context-aware methods** for better traceability.
+
+### Context-Aware Methods
+
+<ParamField path="DebugContext(ctx, msg, args...)" type="void">
+  Logs a debug-level message with context values.
+  
+  ```go
+  log.DebugContext(ctx, "processing request", "user_id", 123)
+  ```
+</ParamField>
+
+<ParamField path="InfoContext(ctx, msg, args...)" type="void">
+  Logs an info-level message with context values.
+  
+  ```go
+  log.InfoContext(ctx, "user created", "id", user.ID, "email", user.Email)
+  ```
+</ParamField>
+
+<ParamField path="WarnContext(ctx, msg, args...)" type="void">
+  Logs a warning-level message with context values.
+  
+  ```go
+  log.WarnContext(ctx, "rate limit approaching", "remaining", 10)
+  ```
+</ParamField>
+
+<ParamField path="ErrorContext(ctx, msg, args...)" type="void">
+  Logs an error-level message with context values.
+  
+  ```go
+  log.ErrorContext(ctx, "database error", "error", err, "query", sql)
+  ```
+</ParamField>
+
+### Simple Methods
+
+These methods don't use context values:
+
+```go
+log.Debug(msg, args...)
+log.Info(msg, args...)
+log.Warn(msg, args...)
+log.Error(msg, args...)
+```
+
+## Context Keys
+
+The logger automatically extracts these context keys:
+
+<ResponseField name="DomainNameKey" type="contextKey">
+  Domain name for domain-driven architecture.
+  
+  ```go
+  ctx = context.WithValue(ctx, log.DomainNameKey, "auth")
+  log.InfoContext(ctx, "domain action")
+  // Output includes: domainName=auth
+  ```
+</ResponseField>
+
+<ResponseField name="TraceIDKey" type="contextKey">
+  Unique trace ID for request tracking.
+  
+  ```go
+  ctx = context.WithValue(ctx, log.TraceIDKey, uuid.NewString())
+  log.InfoContext(ctx, "request started")
+  // Output includes: traceId=abc-123-def
+  ```
+</ResponseField>
+
+<ResponseField name="ServiceNameKey" type="contextKey">
+  Name of the service handling the request.
+  
+  ```go
+  ctx = context.WithValue(ctx, log.ServiceNameKey, "api")
+  log.InfoContext(ctx, "service started")
+  // Output includes: serviceName=api
+  ```
+</ResponseField>
+
+<ResponseField name="StartupTaskKey" type="contextKey">
+  Name of the startup task being executed.
+  
+  ```go
+  ctx = context.WithValue(ctx, log.StartupTaskKey, "migrations")
+  log.InfoContext(ctx, "task running")
+  // Output includes: startupTask=migrations
+  ```
+</ResponseField>
+
+<ResponseField name="UserIDKey" type="contextKey">
+  User ID for user-specific operations.
+  
+  ```go
+  ctx = context.WithValue(ctx, log.UserIDKey, "user_123")
+  log.InfoContext(ctx, "user action")
+  // Output includes: userId=user_123
+  ```
+</ResponseField>
+
+<ResponseField name="WorkerIDKey" type="contextKey">
+  Worker ID for queue processor workers.
+  
+  ```go
+  ctx = context.WithValue(ctx, log.WorkerIDKey, uuid.NewString())
+  log.InfoContext(ctx, "processing job")
+  // Output includes: workerId=worker-abc-123
+  ```
+</ResponseField>
+
+## TraceIDMiddleware
+
+HTTP middleware that adds trace IDs to requests.
+
+```go
+type TraceIDMiddleware struct {
+    contextKey any
+    header     string
+}
+```
+
+### Constructor
+
+<ParamField path="NewTraceIDMiddleware(contextKey, header)" type="*TraceIDMiddleware">
+  Creates a new TraceID middleware.
+  
+  **Parameters:**
+  - `contextKey` (any): Context key to store trace ID (nil = use TraceIDKey)
+  - `header` (string): HTTP header name (empty = use "Platforma-Trace-Id")
+  
+  ```go
+  traceMiddleware := log.NewTraceIDMiddleware(nil, "")
+  server.Use(traceMiddleware)
+  ```
+</ParamField>
+
+### Wrap
+
+<ParamField path="Wrap(h http.Handler)" type="http.Handler">
+  Wraps an HTTP handler to add trace IDs to requests.
+  
+  The middleware:
+  1. Generates a unique trace ID (UUID)
+  2. Adds it to the request context
+  3. Sets it in the response header
+  4. Passes the request to the next handler
+  
+  ```go
+  wrapped := traceMiddleware.Wrap(handler)
+  ```
+</ParamField>
+
+## Example Usage
+
+### Basic Logging
+
+```go
+package main
+
+import (
+    "context"
+    "github.com/platforma-dev/platforma/log"
+)
+
+func main() {
+    ctx := context.Background()
+    
+    // Simple info log
+    log.InfoContext(ctx, "application started")
+    
+    // Structured logging with key-value pairs
+    log.InfoContext(ctx, "user logged in",
+        "user_id", 123,
+        "email", "user@example.com",
+        "ip", "192.168.1.1",
+    )
+    
+    // Error logging
+    err := doSomething()
+    if err != nil {
+        log.ErrorContext(ctx, "operation failed",
+            "error", err,
+            "operation", "doSomething",
+        )
+    }
+}
+```
+
+### With Trace IDs
+
+```go
+import (
+    "context"
+    "github.com/google/uuid"
+    "github.com/platforma-dev/platforma/log"
+)
+
+func handleRequest(ctx context.Context) {
+    // Add trace ID to context
+    traceID := uuid.NewString()
+    ctx = context.WithValue(ctx, log.TraceIDKey, traceID)
+    
+    log.InfoContext(ctx, "request started")
+    // Output: time=... level=INFO msg="request started" traceId=abc-123-def
+    
+    processRequest(ctx)
+    
+    log.InfoContext(ctx, "request completed")
+    // Output: time=... level=INFO msg="request completed" traceId=abc-123-def
+}
+```
+
+### HTTP Server with Trace Middleware
+
+```go
+package main
+
+import (
+    "net/http"
+    "time"
+    "github.com/platforma-dev/platforma/application"
+    "github.com/platforma-dev/platforma/httpserver"
+    "github.com/platforma-dev/platforma/log"
+)
+
+func main() {
+    app := application.New()
+    
+    // Create HTTP server
+    api := httpserver.New("8080", 3*time.Second)
+    
+    // Add trace ID middleware
+    api.Use(log.NewTraceIDMiddleware(nil, ""))
+    
+    // Add handler
+    api.HandleFunc("/users", func(w http.ResponseWriter, r *http.Request) {
+        // Context already has trace ID from middleware
+        log.InfoContext(r.Context(), "listing users")
+        
+        // Trace ID is also in response header: Platforma-Trace-Id
+        w.Write([]byte("users"))
+    })
+    
+    app.RegisterService("api", api)
+    app.Run(context.Background())
+}
+```
+
+### Custom Logger Configuration
+
+```go
+import (
+    "log/slog"
+    "os"
+    "github.com/platforma-dev/platforma/log"
+)
+
+// JSON logger with debug level
+jsonLogger := log.New(os.Stdout, "json", slog.LevelDebug, nil)
+log.SetDefault(jsonLogger)
+
+// Custom context keys
+customKeys := map[string]any{
+    "request_id": requestIDKey,
+    "session_id": sessionIDKey,
+}
+logger := log.New(os.Stdout, "json", slog.LevelInfo, customKeys)
+```
+
+### Output Formats
+
+**Text format:**
+```
+time=2024-01-15T10:30:00.000Z level=INFO msg="user created" traceId=abc-123 userId=user_456 email=user@example.com
+```
+
+**JSON format:**
+```json
+{
+  "time": "2024-01-15T10:30:00.000Z",
+  "level": "INFO",
+  "msg": "user created",
+  "traceId": "abc-123",
+  "userId": "user_456",
+  "email": "user@example.com"
+}
+```
+
+### Multiple Context Values
+
+```go
+func processUserRequest(ctx context.Context, userID string) {
+    // Add multiple context values
+    ctx = context.WithValue(ctx, log.TraceIDKey, uuid.NewString())
+    ctx = context.WithValue(ctx, log.UserIDKey, userID)
+    ctx = context.WithValue(ctx, log.DomainNameKey, "auth")
+    
+    log.InfoContext(ctx, "processing user request")
+    // Output includes: traceId=... userId=... domainName=auth
+    
+    if err := validateUser(ctx, userID); err != nil {
+        log.ErrorContext(ctx, "validation failed", "error", err)
+        return
+    }
+    
+    log.InfoContext(ctx, "request completed successfully")
+}
+```
+
+## Best Practices
+
+1. **Always use context-aware methods** (e.g., `InfoContext`) instead of simple methods
+2. **Add trace IDs** to all requests for distributed tracing
+3. **Use structured logging** with key-value pairs instead of string interpolation
+4. **Include relevant context** like user IDs, request IDs, and error details
+5. **Use appropriate log levels**: Debug for detailed info, Info for normal operations, Warn for concerning situations, Error for actual errors

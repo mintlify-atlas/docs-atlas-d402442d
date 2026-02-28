@@ -1,0 +1,372 @@
+---
+title: Scheduled Tasks
+description: Execute periodic tasks using cron expressions with Platforma's scheduler
+---
+
+Platforma provides a cron-based scheduler for running periodic tasks with full cron expression support.
+
+## Overview
+
+The `scheduler.Scheduler` executes an `application.Runner` according to a cron schedule. It provides:
+
+- Standard 5-field cron syntax
+- Named schedules (`@daily`, `@hourly`, etc.)
+- Interval syntax (`@every 30m`)
+- Automatic validation at construction time
+- Context-aware execution with trace IDs
+
+## Creating a Scheduler
+
+Create a scheduler with a cron expression and a runner:
+
+```go
+import (
+	"github.com/platforma-dev/platforma/scheduler"
+)
+
+scheduler, err := scheduler.New("0 9 * * MON-FRI", myRunner)
+if err != nil {
+	return fmt.Errorf("invalid cron expression: %w", err)
+}
+```
+
+The constructor validates the cron expression and returns an error immediately if it's invalid:
+
+```go
+// This fails at construction time, not when Run() is called
+scheduler, err := scheduler.New("", myRunner)  // Error: empty expression
+scheduler, err := scheduler.New("invalid", myRunner)  // Error: parse error
+```
+
+## Cron Expression Syntax
+
+### Standard 5-Field Format
+
+Standard cron uses 5 fields:
+
+```
+┌───────────── minute (0 - 59)
+│ ┌───────────── hour (0 - 23)
+│ │ ┌───────────── day of month (1 - 31)
+│ │ │ ┌───────────── month (1 - 12)
+│ │ │ │ ┌───────────── day of week (0 - 6) (Sunday to Saturday)
+│ │ │ │ │
+* * * * *
+```
+
+### Examples
+
+<CodeGroup>
+```text Every 5 minutes
+*/5 * * * *
+```
+
+```text Every 2 hours
+0 */2 * * *
+```
+
+```text 9 AM on weekdays
+0 9 * * MON-FRI
+```
+
+```text Midnight on 1st of month
+0 0 1 * *
+```
+
+```text Every Monday at 3:30 PM
+30 15 * * MON
+```
+</CodeGroup>
+
+### Named Schedules
+
+Use predefined schedule names:
+
+- `@yearly` or `@annually` - Run once a year at midnight on January 1st (`0 0 1 1 *`)
+- `@monthly` - Run once a month at midnight on the first day (`0 0 1 * *`)
+- `@weekly` - Run once a week at midnight on Sunday (`0 0 * * 0`)
+- `@daily` or `@midnight` - Run once a day at midnight (`0 0 * * *`)
+- `@hourly` - Run once an hour at the start of the hour (`0 * * * *`)
+
+```go
+scheduler, err := scheduler.New("@daily", backupRunner)
+```
+
+### Interval Syntax
+
+Use `@every` for simple intervals:
+
+```go
+scheduler.New("@every 30m", runner)   // Every 30 minutes
+scheduler.New("@every 2h", runner)    // Every 2 hours
+scheduler.New("@every 1h30m", runner) // Every 1.5 hours
+scheduler.New("@every 5s", runner)    // Every 5 seconds
+```
+
+## Running the Scheduler
+
+Start the scheduler with `Run(ctx)`:
+
+```go
+err := scheduler.Run(ctx)
+if err != nil {
+	return err
+}
+```
+
+The scheduler:
+
+1. Starts the cron scheduler
+2. Blocks until the context is cancelled
+3. Stops the scheduler gracefully
+4. Returns when all tasks complete
+
+## Task Execution
+
+Each scheduled execution:
+
+- Gets a new context with a unique trace ID
+- Logs start and completion
+- Logs errors but continues running
+- Maintains the original parent context
+
+```go
+// Each execution gets a unique trace ID
+runCtx := context.WithValue(ctx, log.TraceIDKey, uuid.NewString())
+
+log.InfoContext(runCtx, "scheduler task started")
+err := runner.Run(runCtx)
+if err != nil {
+	log.ErrorContext(runCtx, "error in scheduler", "error", err)
+	// Continues to next scheduled run
+}
+log.InfoContext(runCtx, "scheduler task finished")
+```
+
+## Implementing a Runner
+
+Your task must implement the `application.Runner` interface:
+
+```go
+type Runner interface {
+	Run(context.Context) error
+}
+```
+
+<CodeGroup>
+```go Struct-based Runner
+type BackupRunner struct {
+	db *database.Database
+	s3 *s3.Client
+}
+
+func (r *BackupRunner) Run(ctx context.Context) error {
+	log.InfoContext(ctx, "starting backup")
+
+	// Perform backup
+	data, err := r.db.Export(ctx)
+	if err != nil {
+		return fmt.Errorf("export failed: %w", err)
+	}
+
+	err = r.s3.Upload(ctx, data)
+	if err != nil {
+		return fmt.Errorf("upload failed: %w", err)
+	}
+
+	log.InfoContext(ctx, "backup completed")
+	return nil
+}
+```
+
+```go Function-based Runner
+type RunnerFunc func(context.Context) error
+
+func (f RunnerFunc) Run(ctx context.Context) error {
+	return f(ctx)
+}
+
+// Usage
+runner := RunnerFunc(func(ctx context.Context) error {
+	log.InfoContext(ctx, "running scheduled task")
+	// Do work...
+	return nil
+})
+```
+</CodeGroup>
+
+## Complete Example
+
+<Steps>
+  <Step title="Create a runner">
+    Implement the task logic:
+    ```go
+    type CleanupRunner struct {
+      db *database.Database
+    }
+
+    func (r *CleanupRunner) Run(ctx context.Context) error {
+      log.InfoContext(ctx, "cleaning up expired sessions")
+
+      result, err := r.db.Connection().ExecContext(ctx,
+        "DELETE FROM sessions WHERE expires < NOW()")
+      if err != nil {
+        return fmt.Errorf("cleanup failed: %w", err)
+      }
+
+      rows, _ := result.RowsAffected()
+      log.InfoContext(ctx, "cleanup complete", "deleted", rows)
+      return nil
+    }
+    ```
+  </Step>
+
+  <Step title="Create the scheduler">
+    Configure the schedule:
+    ```go
+    runner := &CleanupRunner{db: db}
+
+    // Run daily at 2 AM
+    scheduler, err := scheduler.New("0 2 * * *", runner)
+    if err != nil {
+      return err
+    }
+    ```
+  </Step>
+
+  <Step title="Register with application">
+    Add to your application's runners:
+    ```go
+    app := application.New()
+    app.AddRunner("cleanup-scheduler", scheduler)
+
+    if err := app.Run(ctx); err != nil {
+      log.Error("application failed", "error", err)
+    }
+    ```
+  </Step>
+</Steps>
+
+## Multiple Schedulers
+
+Create multiple schedulers for different tasks:
+
+```go
+app := application.New()
+
+// Daily backup at 2 AM
+backupScheduler, _ := scheduler.New("0 2 * * *", backupRunner)
+app.AddRunner("backup-scheduler", backupScheduler)
+
+// Cleanup every 6 hours
+cleanupScheduler, _ := scheduler.New("0 */6 * * *", cleanupRunner)
+app.AddRunner("cleanup-scheduler", cleanupScheduler)
+
+// Health check every 5 minutes
+healthScheduler, _ := scheduler.New("*/5 * * * *", healthRunner)
+app.AddRunner("health-scheduler", healthScheduler)
+
+app.Run(ctx)
+```
+
+## Time Zone
+
+Schedulers use UTC by default. All cron expressions are evaluated in UTC:
+
+```go
+// This runs at 9 AM UTC, not local time
+scheduler.New("0 9 * * *", runner)
+```
+
+## Error Handling
+
+Errors from the runner are logged but don't stop the scheduler:
+
+```go
+func (r *MyRunner) Run(ctx context.Context) error {
+	err := r.doWork(ctx)
+	if err != nil {
+		// This error is logged but the scheduler continues
+		return fmt.Errorf("work failed: %w", err)
+	}
+	return nil
+}
+```
+
+If you want to stop the scheduler on error, cancel the context from within the runner:
+
+```go
+func (r *MyRunner) Run(ctx context.Context) error {
+	err := r.doWork(ctx)
+	if errors.Is(err, ErrCritical) {
+		// Cancel the context to stop the scheduler
+		r.cancel()
+	}
+	return err
+}
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Validate early" icon="check">
+    The constructor validates cron expressions at creation time, so invalid schedules fail fast during application startup.
+  </Card>
+
+  <Card title="Use named schedules" icon="tag">
+    Prefer `@daily` over `0 0 * * *` for better readability and intent.
+  </Card>
+
+  <Card title="Make tasks idempotent" icon="rotate">
+    Tasks may run multiple times if the application restarts. Ensure they're safe to re-run.
+  </Card>
+
+  <Card title="Monitor task duration" icon="clock">
+    Log start and end times to track how long tasks take and detect slowdowns.
+  </Card>
+</CardGroup>
+
+## Testing Schedulers
+
+Test your runner independently of the scheduler:
+
+```go
+func TestCleanupRunner(t *testing.T) {
+	db := setupTestDB(t)
+	runner := &CleanupRunner{db: db}
+
+	ctx := context.Background()
+	err := runner.Run(ctx)
+	if err != nil {
+		t.Fatalf("runner failed: %v", err)
+	}
+
+	// Verify cleanup worked
+	count := countSessions(t, db)
+	if count != 0 {
+		t.Errorf("expected 0 sessions, got %d", count)
+	}
+}
+```
+
+For integration tests with actual schedules, use short intervals:
+
+```go
+func TestSchedulerIntegration(t *testing.T) {
+	runner := &TestRunner{}
+	
+	// Use a very short interval for testing
+	scheduler, _ := scheduler.New("@every 1s", runner)
+	
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	
+	go scheduler.Run(ctx)
+	
+	// Wait and verify runner was called
+	time.Sleep(3 * time.Second)
+	if runner.callCount < 2 {
+		t.Errorf("expected at least 2 calls, got %d", runner.callCount)
+	}
+}
+```

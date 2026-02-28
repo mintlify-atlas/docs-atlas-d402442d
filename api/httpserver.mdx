@@ -1,0 +1,264 @@
+---
+title: "HTTPServer"
+description: "HTTP server with middleware support and graceful shutdown"
+---
+
+The `httpserver` package provides an HTTP server with middleware support, handler groups, and graceful shutdown capabilities.
+
+## HTTPServer Type
+
+The `HTTPServer` type represents an HTTP server with middleware support and graceful shutdown.
+
+```go
+type HTTPServer struct {
+    // Embeds HandlerGroup for routing capabilities
+    port            string
+    shutdownTimeout time.Duration
+}
+```
+
+### Constructor
+
+<ParamField path="New(port, shutdownTimeout)" type="*HTTPServer">
+  Creates a new HTTPServer instance.
+  
+  **Parameters:**
+  - `port` (string): The port number to listen on (e.g., "8080")
+  - `shutdownTimeout` (time.Duration): Maximum time to wait for graceful shutdown
+  
+  ```go
+  server := httpserver.New("8080", 3*time.Second)
+  ```
+</ParamField>
+
+## HTTPServer Methods
+
+### Run
+
+<ParamField path="Run(ctx context.Context)" type="error">
+  Starts the HTTP server and handles graceful shutdown when the context is canceled.
+  
+  The server will:
+  1. Start listening on the configured port
+  2. Block until the context is canceled (e.g., interrupt signal)
+  3. Gracefully shut down within the shutdown timeout
+  
+  ```go
+  if err := server.Run(ctx); err != nil {
+      log.ErrorContext(ctx, "server error", "error", err)
+  }
+  ```
+</ParamField>
+
+### Healthcheck
+
+<ParamField path="Healthcheck(ctx context.Context)" type="any">
+  Returns health check information for the HTTP server.
+  
+  ```go
+  health := server.Healthcheck(ctx)
+  // Returns: map[string]any{"port": "8080"}
+  ```
+</ParamField>
+
+## HandlerGroup Type
+
+The `HandlerGroup` represents a group of HTTP handlers that share common middleware.
+
+```go
+type HandlerGroup struct {
+    mux         *http.ServeMux
+    middlewares []Middleware
+}
+```
+
+### Constructor
+
+<ParamField path="NewHandlerGroup()" type="*HandlerGroup">
+  Creates a new HandlerGroup with an initialized http.ServeMux.
+  
+  ```go
+  group := httpserver.NewHandlerGroup()
+  ```
+</ParamField>
+
+## HandlerGroup Methods
+
+### Handle
+
+<ParamField path="Handle(pattern string, handler http.Handler)" type="void">
+  Registers an http.Handler for the given pattern.
+  
+  ```go
+  server.Handle("/api", myHandler)
+  ```
+</ParamField>
+
+### HandleFunc
+
+<ParamField path="HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request))" type="void">
+  Registers an http.HandlerFunc for the given pattern.
+  
+  ```go
+  server.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
+      w.Write([]byte("pong"))
+  })
+  ```
+</ParamField>
+
+### HandleGroup
+
+<ParamField path="HandleGroup(pattern string, handler http.Handler)" type="void">
+  Applies `http.StripPrefix` to the handler and registers it for the given pattern. Useful for mounting sub-routers.
+  
+  ```go
+  subGroup := httpserver.NewHandlerGroup()
+  subGroup.HandleFunc("/users", listUsers)
+  
+  server.HandleGroup("/api", subGroup)
+  // Accessible at: /api/users
+  ```
+</ParamField>
+
+### Use
+
+<ParamField path="Use(middlewares ...Middleware)" type="void">
+  Adds one or more middlewares to the HandlerGroup's middleware chain.
+  
+  ```go
+  server.Use(log.NewTraceIDMiddleware(nil, ""))
+  ```
+</ParamField>
+
+### UseFunc
+
+<ParamField path="UseFunc(middlewareFuncs ...func(http.Handler) http.Handler)" type="void">
+  Adds functions as middleware to the HandlerGroup's middleware chain.
+  
+  ```go
+  server.UseFunc(func(h http.Handler) http.Handler {
+      return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+          log.InfoContext(r.Context(), "request", "path", r.URL.Path)
+          h.ServeHTTP(w, r)
+      })
+  })
+  ```
+</ParamField>
+
+### ServeHTTP
+
+<ParamField path="ServeHTTP(w http.ResponseWriter, r *http.Request)" type="void">
+  Implements the http.Handler interface, allowing HandlerGroup to be used as an HTTP handler itself.
+</ParamField>
+
+## Middleware Interface
+
+The Middleware interface defines HTTP middleware.
+
+```go
+type Middleware interface {
+    Wrap(http.Handler) http.Handler
+}
+```
+
+<ResponseField name="Wrap" type="func(http.Handler) http.Handler">
+  Wraps an http.Handler with middleware logic.
+</ResponseField>
+
+### MiddlewareFunc
+
+A convenience type that implements the Middleware interface.
+
+```go
+type MiddlewareFunc func(http.Handler) http.Handler
+
+func (f MiddlewareFunc) Wrap(h http.Handler) http.Handler {
+    return f(h)
+}
+```
+
+## Example Usage
+
+### Basic HTTP Server
+
+```go
+package main
+
+import (
+    "context"
+    "net/http"
+    "time"
+    "github.com/platforma-dev/platforma/application"
+    "github.com/platforma-dev/platforma/httpserver"
+    "github.com/platforma-dev/platforma/log"
+)
+
+func main() {
+    ctx := context.Background()
+    app := application.New()
+    
+    // Create HTTP server
+    api := httpserver.New("8080", 3*time.Second)
+    
+    // Add endpoints
+    api.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
+        w.Write([]byte("pong"))
+    })
+    
+    // Add middleware
+    api.Use(log.NewTraceIDMiddleware(nil, ""))
+    
+    // Register with application
+    app.RegisterService("api", api)
+    
+    if err := app.Run(ctx); err != nil {
+        log.ErrorContext(ctx, "app failed", "error", err)
+    }
+}
+```
+
+### Using Handler Groups
+
+```go
+// Create main server
+api := httpserver.New("8080", 3*time.Second)
+
+// Create a sub-group for API v1
+apiV1 := httpserver.NewHandlerGroup()
+apiV1.HandleFunc("/users", listUsers)
+apiV1.HandleFunc("/posts", listPosts)
+
+// Add middleware to the group
+apiV1.UseFunc(func(h http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        log.InfoContext(r.Context(), "API v1 request", "path", r.URL.Path)
+        h.ServeHTTP(w, r)
+    })
+})
+
+// Mount the group
+api.HandleGroup("/api/v1", apiV1)
+
+// Accessible at:
+// - /api/v1/users
+// - /api/v1/posts
+```
+
+### Custom Middleware
+
+```go
+type LoggingMiddleware struct{}
+
+func (m *LoggingMiddleware) Wrap(h http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        start := time.Now()
+        log.InfoContext(r.Context(), "request started", "method", r.Method, "path", r.URL.Path)
+        
+        h.ServeHTTP(w, r)
+        
+        log.InfoContext(r.Context(), "request completed", "duration", time.Since(start))
+    })
+}
+
+server.Use(&LoggingMiddleware{})
+```

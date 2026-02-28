@@ -1,0 +1,515 @@
+---
+title: 'Auth Package'
+description: 'Complete authentication and user management system with session handling and HTTP middleware'
+---
+
+## Overview
+
+The `auth` package provides a full-featured authentication domain with user registration, login/logout, password management, and session-based authentication middleware.
+
+## Domain
+
+### auth.Domain
+
+The main domain aggregate that bundles all auth components.
+
+```go
+type Domain struct {
+    Repository  *Repository
+    Service     *Service
+    HandleGroup *httpserver.HandlerGroup
+    Middleware  httpserver.Middleware
+}
+```
+
+<ParamField path="Repository" type="*Repository">
+  Database repository for user persistence
+</ParamField>
+
+<ParamField path="Service" type="*Service">
+  Business logic service for authentication operations
+</ParamField>
+
+<ParamField path="HandleGroup" type="*httpserver.HandlerGroup">
+  Pre-configured HTTP handlers for auth endpoints
+</ParamField>
+
+<ParamField path="Middleware" type="httpserver.Middleware">
+  Authentication middleware for protecting routes
+</ParamField>
+
+### Constructor
+
+```go
+func New(
+    db db,
+    authStorage authStorage,
+    sessionCookieName string,
+    usernameValidator func(string) error,
+    passwordValidator func(string) error,
+    cleanupEnqueuer cleanupEnqueuer,
+) *Domain
+```
+
+<ParamField path="db" type="db" required>
+  Database interface (sqlx-compatible)
+</ParamField>
+
+<ParamField path="authStorage" type="authStorage" required>
+  Session storage interface (typically session.Service)
+</ParamField>
+
+<ParamField path="sessionCookieName" type="string" required>
+  Name of the HTTP cookie for session ID
+</ParamField>
+
+<ParamField path="usernameValidator" type="func(string) error">
+  Custom username validation function (optional, uses default if nil)
+</ParamField>
+
+<ParamField path="passwordValidator" type="func(string) error">
+  Custom password validation function (optional, uses default if nil)
+</ParamField>
+
+<ParamField path="cleanupEnqueuer" type="cleanupEnqueuer">
+  Queue enqueuer for user cleanup jobs (optional)
+</ParamField>
+
+## Service
+
+### auth.Service
+
+Core business logic for authentication and user management.
+
+```go
+type Service struct {
+    repo              repository
+    authStorage       authStorage
+    sessionCookieName string
+    usernameValidator func(string) error
+    passwordValidator func(string) error
+    cleanupEnqueuer   cleanupEnqueuer
+}
+```
+
+### Methods
+
+#### Register
+
+```go
+func (s *Service) CreateWithLoginAndPassword(ctx context.Context, username, password string) error
+```
+
+Creates a new user account with username and password. Validates inputs, generates salt, hashes password with bcrypt.
+
+<ParamField path="username" type="string" required>
+  Username for the new account (validated by usernameValidator)
+</ParamField>
+
+<ParamField path="password" type="string" required>
+  Password for the new account (validated by passwordValidator)
+</ParamField>
+
+<ResponseField name="error" type="error">
+  Returns `ErrInvalidUsername`, `ErrInvalidPassword`, or creation error
+</ResponseField>
+
+**Default validation rules:**
+- Username: 5-20 characters
+- Password: 8-100 characters
+
+#### Login
+
+```go
+func (s *Service) CreateSessionFromUsernameAndPassword(ctx context.Context, username, password string) (string, error)
+```
+
+Authenticates user credentials and creates a new session.
+
+<ParamField path="username" type="string" required>
+  Username to authenticate
+</ParamField>
+
+<ParamField path="password" type="string" required>
+  Password to verify
+</ParamField>
+
+<ResponseField name="sessionId" type="string">
+  New session ID on success
+</ResponseField>
+
+<ResponseField name="error" type="error">
+  Returns `ErrWrongUserOrPassword` if credentials invalid
+</ResponseField>
+
+#### Logout
+
+```go
+func (s *Service) DeleteSession(ctx context.Context, sessionId string) error
+```
+
+Deletes a session from storage.
+
+<ParamField path="sessionId" type="string" required>
+  Session ID to delete
+</ParamField>
+
+#### Get User
+
+```go
+func (s *Service) Get(ctx context.Context, id string) (*User, error)
+```
+
+Retrieves a user by ID.
+
+```go
+func (s *Service) GetFromSession(ctx context.Context, sessionId string) (*User, error)
+```
+
+Retrieves a user from a session ID.
+
+#### Change Password
+
+```go
+func (s *Service) ChangePassword(ctx context.Context, currentPassword, newPassword string) error
+```
+
+Changes the authenticated user's password. User must be in context (requires middleware).
+
+<ParamField path="currentPassword" type="string" required>
+  Current password for verification
+</ParamField>
+
+<ParamField path="newPassword" type="string" required>
+  New password (validated by passwordValidator)
+</ParamField>
+
+<ResponseField name="error" type="error">
+  Returns `ErrCurrentPasswordIncorrect`, `ErrInvalidPassword`, or update error
+</ResponseField>
+
+#### Delete User
+
+```go
+func (s *Service) DeleteUser(ctx context.Context) error
+```
+
+Deletes the authenticated user and all their sessions. User must be in context (requires middleware). Optionally enqueues cleanup job.
+
+## Repository
+
+### auth.Repository
+
+Database operations for user persistence.
+
+```go
+type Repository struct {
+    db db
+}
+```
+
+### Methods
+
+```go
+func (r *Repository) Get(ctx context.Context, id string) (*User, error)
+func (r *Repository) GetByUsername(ctx context.Context, username string) (*User, error)
+func (r *Repository) Create(ctx context.Context, user *User) error
+func (r *Repository) UpdatePassword(ctx context.Context, id, password, salt string) error
+func (r *Repository) Delete(ctx context.Context, id string) error
+func (r *Repository) Migrations() fs.FS
+```
+
+## Middleware
+
+### auth.AuthenticationMiddleware
+
+HTTP middleware that validates sessions and injects users into request context.
+
+```go
+type AuthenticationMiddleware struct {
+    userService userService
+}
+
+func (m *AuthenticationMiddleware) Wrap(next http.Handler) http.Handler
+```
+
+**Behavior:**
+1. Reads session cookie from request
+2. Validates session with auth storage
+3. Retrieves user from session
+4. Injects user into request context
+5. Returns 401 Unauthorized if session invalid
+
+**Usage:**
+
+```go
+// Protect entire handler group
+protectedAPI := httpserver.NewHandlerGroup()
+protectedAPI.Use(authDomain.Middleware)
+
+// Protect single handler
+protectedHandler := authDomain.Middleware.Wrap(myHandler)
+```
+
+## HTTP Handlers
+
+All handlers are pre-configured in `Domain.HandleGroup` with these routes:
+
+| Method | Route | Handler | Protected | Description |
+|--------|-------|---------|-----------|-------------|
+| POST | `/register` | RegisterHandler | No | Create new user account |
+| POST | `/login` | LoginHandler | No | Authenticate and create session |
+| POST | `/logout` | LogoutHandler | No | Delete session and clear cookie |
+| GET | `/me` | GetHandler | No | Get current user info |
+| POST | `/change-password` | ChangePasswordHandler | Yes | Change user password |
+| DELETE | `/me` | DeleteHandler | Yes | Delete user account |
+
+### POST /register
+
+**Request:**
+```json
+{
+  "login": "username",
+  "password": "password123"
+}
+```
+
+**Response:**
+- `201 Created` - User created successfully
+- `400 Bad Request` - Invalid username or password
+- `500 Internal Server Error` - Creation failed
+
+### POST /login
+
+**Request:**
+```json
+{
+  "login": "username",
+  "password": "password123"
+}
+```
+
+**Response:**
+- `200 OK` - Sets session cookie
+- `401 Unauthorized` - Invalid credentials
+- `500 Internal Server Error` - Session creation failed
+
+### POST /logout
+
+**Response:**
+- `200 OK` - Clears session cookie
+- `500 Internal Server Error` - Session deletion failed
+
+### GET /me
+
+**Response:**
+```json
+{
+  "username": "username"
+}
+```
+- `200 OK` - Returns user info
+- `401 Unauthorized` - No valid session
+- `500 Internal Server Error` - Retrieval failed
+
+### POST /change-password
+
+**Request:**
+```json
+{
+  "currentPassword": "oldpass123",
+  "newPassword": "newpass456"
+}
+```
+
+**Response:**
+- `200 OK` - Password changed
+- `400 Bad Request` - Invalid new password
+- `401 Unauthorized` - Current password incorrect
+- `500 Internal Server Error` - Update failed
+
+### DELETE /me
+
+**Response:**
+- `200 OK` - User deleted
+- `401 Unauthorized` - No valid session
+- `500 Internal Server Error` - Deletion failed
+
+## Models
+
+### User
+
+```go
+type User struct {
+    ID       string    `db:"id"       json:"id"`
+    Username string    `db:"username" json:"username"`
+    Password string    `db:"password" json:"password"`
+    Salt     string    `db:"salt"     json:"salt"`
+    Created  time.Time `db:"created"  json:"created"`
+    Updated  time.Time `db:"updated"  json:"updated"`
+    Status   Status    `db:"status"   json:"status"`
+}
+```
+
+<ParamField path="ID" type="string">
+  UUID primary key
+</ParamField>
+
+<ParamField path="Username" type="string">
+  Unique username
+</ParamField>
+
+<ParamField path="Password" type="string">
+  Bcrypt-hashed password with salt
+</ParamField>
+
+<ParamField path="Salt" type="string">
+  Random UUID used in password hashing
+</ParamField>
+
+<ParamField path="Created" type="time.Time">
+  Account creation timestamp
+</ParamField>
+
+<ParamField path="Updated" type="time.Time">
+  Last update timestamp
+</ParamField>
+
+<ParamField path="Status" type="Status">
+  Account status: "active", "inactive", or "deleted"
+</ParamField>
+
+### Status
+
+```go
+type Status string
+
+const (
+    StatusActive   Status = "active"
+    StatusInactive Status = "inactive"
+    StatusDeleted  Status = "deleted"
+)
+```
+
+## Context Helpers
+
+### UserFromContext
+
+```go
+func UserFromContext(ctx context.Context) *User
+```
+
+Retrieves the authenticated user from request context. Returns `nil` if no user in context.
+
+**Usage:**
+```go
+user := auth.UserFromContext(r.Context())
+if user == nil {
+    // Not authenticated
+}
+```
+
+## Errors
+
+```go
+var (
+    ErrUserNotFound        = errors.New("user not found")
+    ErrWrongUserOrPassword = errors.New("wrong user or password")
+
+    ErrInvalidUsername = errors.New("invalid username")
+    ErrShortUsername   = errors.New("short username")
+    ErrLongUsername    = errors.New("long username")
+
+    ErrInvalidPassword          = errors.New("invalid password")
+    ErrShortPassword            = errors.New("short password")
+    ErrLongPassword             = errors.New("long password")
+    ErrCurrentPasswordIncorrect = errors.New("current password is incorrect")
+)
+```
+
+## Complete Example
+
+```go
+package main
+
+import (
+    "github.com/platforma-dev/platforma/application"
+    "github.com/platforma-dev/platforma/auth"
+    "github.com/platforma-dev/platforma/database"
+    "github.com/platforma-dev/platforma/httpserver"
+    "github.com/platforma-dev/platforma/session"
+)
+
+func main() {
+    app := application.New()
+
+    // Setup database
+    dbDomain := database.New(database.Config{
+        Host:     "localhost",
+        Port:     5432,
+        Database: "myapp",
+        User:     "postgres",
+        Password: "password",
+    })
+    app.AddDomain("database", dbDomain)
+
+    // Setup session storage
+    sessionDomain := session.New(dbDomain.Service)
+    app.AddDomain("session", sessionDomain)
+
+    // Setup auth with custom validators
+    authDomain := auth.New(
+        dbDomain.Service,
+        sessionDomain.Service,
+        "session_id",
+        func(username string) error {
+            if len(username) < 3 {
+                return errors.New("username too short")
+            }
+            return nil
+        },
+        func(password string) error {
+            if len(password) < 12 {
+                return errors.New("password must be 12+ chars")
+            }
+            return nil
+        },
+        nil, // no cleanup enqueuer
+    )
+    app.AddDomain("auth", authDomain)
+
+    // Setup HTTP server
+    server := httpserver.New(":8080")
+    
+    // Mount auth endpoints at /auth
+    server.Handle("/auth/", http.StripPrefix("/auth", authDomain.HandleGroup))
+    
+    // Protect application routes
+    protectedAPI := httpserver.NewHandlerGroup()
+    protectedAPI.Use(authDomain.Middleware)
+    protectedAPI.Handle("GET /profile", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        user := auth.UserFromContext(r.Context())
+        json.NewEncoder(w).Encode(map[string]string{
+            "user_id": user.ID,
+            "username": user.Username,
+        })
+    }))
+    
+    server.Handle("/api/", http.StripPrefix("/api", protectedAPI))
+
+    app.AddRunner("httpserver", server)
+
+    if err := app.Run(); err != nil {
+        panic(err)
+    }
+}
+```
+
+## Authentication Flow
+
+1. **Registration**: User submits username/password → Service validates → Repository creates user with hashed password
+2. **Login**: User submits credentials → Service verifies password → Session created → Cookie set
+3. **Protected Request**: Request with cookie → Middleware validates session → User injected into context → Handler executes
+4. **Logout**: Logout request → Service deletes session → Cookie cleared
+5. **Password Change**: Authenticated user submits old/new password → Service verifies old password → Updates with new hashed password
+6. **Account Deletion**: Authenticated user requests deletion → Service deletes all sessions → Deletes user → Enqueues cleanup job

@@ -1,0 +1,163 @@
+---
+title: Architecture
+description: Understand Platforma's domain-driven design and package structure
+---
+
+Platforma follows a **domain-driven design (DDD)** pattern that organizes code around business domains rather than technical layers. Each domain encapsulates its own data access, business logic, HTTP handlers, and middleware.
+
+## Package Structure
+
+The framework provides the following core packages:
+
+<CardGroup cols={2}>
+  <Card title="application" icon="gear">
+    Core lifecycle management: `Application`, `Domain` interface, `Runner`, startup tasks
+  </Card>
+  <Card title="httpserver" icon="server">
+    HTTP server with `HTTPServer`, `HandlerGroup`, and `Middleware` support
+  </Card>
+  <Card title="database" icon="database">
+    PostgreSQL integration with migrations using `sqlx` and `lib/pq` driver
+  </Card>
+  <Card title="queue" icon="list-check">
+    Background job processing with `Processor[T]` and `Handler[T]` interfaces
+  </Card>
+  <Card title="scheduler" icon="clock">
+    Periodic task execution for cron-like functionality
+  </Card>
+  <Card title="log" icon="file-lines">
+    Structured logging with context support
+  </Card>
+  <Card title="auth" icon="lock">
+    Built-in authentication domain (reference implementation)
+  </Card>
+  <Card title="session" icon="key">
+    Session management domain
+  </Card>
+</CardGroup>
+
+## Domain-Driven Design Pattern
+
+<Info>
+A **domain** represents a bounded context in your application. It aggregates all components needed for a specific business capability.
+</Info>
+
+Each domain typically contains four components:
+
+```go
+type Domain struct {
+    Repository  *Repository               // Database operations
+    Service     *Service                  // Business logic
+    HandleGroup *httpserver.HandlerGroup  // HTTP endpoints (optional)
+    Middleware  httpserver.Middleware     // Request processing (optional)
+}
+```
+
+### Domain Interface
+
+All domains must implement the `application.Domain` interface defined in `application/domain.go:4`:
+
+```go
+type Domain interface {
+    GetRepository() any
+}
+```
+
+This allows the application to register the domain's repository for database migrations.
+
+### Component Responsibilities
+
+| Component | Required | Purpose |
+|-----------|----------|---------|
+| **Repository** | Yes | Database operations, exposes migrations |
+| **Service** | Yes | Business logic, orchestrates repository calls |
+| **HandlerGroup** | No | HTTP API endpoints for the domain |
+| **Middleware** | No | Request interceptors (auth, validation, etc.) |
+
+## Reference Implementation: Auth Domain
+
+The `auth` package provides a complete domain example. See `auth/domain.go:7` for the full implementation:
+
+```go
+type Domain struct {
+    Repository  *Repository
+    Service     *Service
+    HandleGroup *httpserver.HandlerGroup
+    Middleware  httpserver.Middleware
+}
+
+func (d *Domain) GetRepository() any {
+    return d.Repository
+}
+```
+
+<Tip>
+Use the auth domain as a template when creating new domains. It demonstrates all four components working together.
+</Tip>
+
+## Package Organization
+
+A typical domain package structure:
+
+```
+auth/
+├── domain.go       # Domain aggregate + constructor
+├── model.go        # Data models (User, Status, etc.)
+├── repository.go   # Database queries + migrations
+├── service.go      # Business logic
+├── middleware.go   # HTTP middleware
+├── handler_*.go    # HTTP handlers
+├── context.go      # Context helpers
+└── errors.go       # Domain-specific errors
+```
+
+## Architectural Principles
+
+<AccordionGroup>
+  <Accordion title="Dependencies Flow Inward">
+    Repositories depend only on the database. Services depend on repositories. Handlers depend on services. This creates a clean dependency graph.
+  </Accordion>
+  
+  <Accordion title="Domains are Self-Contained">
+    Each domain manages its own database schema, migrations, business rules, and API. Domains can depend on other domains via their service interfaces.
+  </Accordion>
+  
+  <Accordion title="No Global State">
+    Except for `log.Logger`, the framework avoids global state. All dependencies are explicitly passed through constructors.
+  </Accordion>
+  
+  <Accordion title="Interface-Based Design">
+    Components depend on interfaces, not concrete types. This enables testing with mocks and allows swapping implementations.
+  </Accordion>
+</AccordionGroup>
+
+## Quick Reference
+
+For common tasks, refer to this mapping:
+
+| Task | Location | Reference |
+|------|----------|-----------|
+| Add new domain | `application/domain.go` | Implement `Domain` interface |
+| Add HTTP routes | `httpserver/handlergroup.go` | Use `Handle("METHOD /path", handler)` |
+| Add middleware | `httpserver/middleware.go` | Implement `Wrap(http.Handler) http.Handler` |
+| Database migrations | Repository's `Migrations()` | Returns `[]database.Migration` |
+| Register with app | `application/application.go` | `RegisterDomain()`, `RegisterService()` |
+| Background jobs | `queue/processor.go` | Implement `Handler[T]` interface |
+| Scheduled tasks | `scheduler/scheduler.go` | Pass `Runner` + duration |
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Application Lifecycle" icon="rotate" href="/concepts/application-lifecycle">
+    Learn how to bootstrap and run your application
+  </Card>
+  <Card title="Domains" icon="layer-group" href="/concepts/domains">
+    Deep dive into creating and registering domains
+  </Card>
+  <Card title="HTTP Routing" icon="route" href="/concepts/http-routing">
+    Set up HTTP endpoints and route groups
+  </Card>
+  <Card title="Middleware" icon="filter" href="/concepts/middleware">
+    Add request processing with middleware
+  </Card>
+</CardGroup>

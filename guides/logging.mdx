@@ -1,0 +1,381 @@
+---
+title: Logging
+description: Use structured, context-aware logging in Platforma for better observability
+---
+
+Platforma provides structured logging built on Go's standard `log/slog` package with automatic context enrichment.
+
+## Overview
+
+The logging system provides:
+
+- Structured logging with key-value pairs
+- Context-aware logging with automatic field injection
+- Multiple output formats (JSON, text)
+- Configurable log levels
+- Trace ID support for request correlation
+- Integration with other Platforma components
+
+## Basic Usage
+
+Use the package-level functions for simple logging:
+
+```go
+import "github.com/platforma-dev/platforma/log"
+
+log.Info("application started", "port", 8080)
+log.Error("failed to connect", "error", err, "host", host)
+log.Warn("rate limit approaching", "requests", count, "limit", max)
+log.Debug("cache hit", "key", key)
+```
+
+Each function accepts a message string followed by key-value pairs for structured data.
+
+## Context-Aware Logging
+
+Use context variants to automatically include context values:
+
+```go
+log.InfoContext(ctx, "request started")
+log.ErrorContext(ctx, "database query failed", "error", err)
+log.WarnContext(ctx, "slow query detected", "duration", duration)
+log.DebugContext(ctx, "cache miss", "key", key)
+```
+
+Context logging automatically extracts and includes:
+- Trace ID
+- User ID
+- Worker ID
+- Domain name
+- Service name
+- Startup task name
+
+## Context Keys
+
+Platforma defines standard context keys for enrichment:
+
+```go
+const (
+	// TraceIDKey is the context key for trace ID
+	TraceIDKey contextKey = "traceId"
+	
+	// UserIDKey is the context key for user ID
+	UserIDKey contextKey = "userId"
+	
+	// WorkerIDKey is the context key for queue worker ID
+	WorkerIDKey contextKey = "workerId"
+	
+	// ServiceNameKey is the context key for service name
+	ServiceNameKey contextKey = "serviceName"
+	
+	// DomainNameKey is the context key for domain name
+	DomainNameKey contextKey = "domainName"
+	
+	// StartupTaskKey is the context key for startup task
+	StartupTaskKey contextKey = "startupTask"
+)
+```
+
+### Adding Context Values
+
+Add context values to enable automatic enrichment:
+
+```go
+import "github.com/google/uuid"
+
+// Add trace ID
+traceID := uuid.NewString()
+ctx = context.WithValue(ctx, log.TraceIDKey, traceID)
+
+// Add user ID
+ctx = context.WithValue(ctx, log.UserIDKey, user.ID)
+
+// Log with enriched context
+log.InfoContext(ctx, "processing request")
+// Output includes: traceId=xxx userId=yyy
+```
+
+## Trace IDs
+
+Trace IDs enable request correlation across logs:
+
+### Manual Trace ID
+
+```go
+import "github.com/google/uuid"
+
+func handleRequest(w http.ResponseWriter, r *http.Request) {
+	traceID := uuid.NewString()
+	ctx := context.WithValue(r.Context(), log.TraceIDKey, traceID)
+	
+	log.InfoContext(ctx, "request started")
+	// ... process request ...
+	log.InfoContext(ctx, "request completed")
+	// Both logs include the same traceId
+}
+```
+
+### Automatic Trace ID with Middleware
+
+Platforma's HTTP server includes trace ID middleware:
+
+```go
+import (
+	"github.com/platforma-dev/platforma/httpserver"
+	"github.com/google/uuid"
+)
+
+// This middleware is typically included by default
+traceMiddleware := httpserver.MiddlewareFunc(func(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		traceID := uuid.NewString()
+		ctx := context.WithValue(r.Context(), log.TraceIDKey, traceID)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+})
+
+server.Use(traceMiddleware)
+```
+
+## Creating a Logger
+
+Create a custom logger with specific configuration:
+
+```go
+import (
+	"os"
+	"log/slog"
+	"github.com/platforma-dev/platforma/log"
+)
+
+// JSON logger at Info level
+logger := log.New(os.Stdout, "json", slog.LevelInfo, nil)
+
+// Text logger at Debug level
+logger := log.New(os.Stdout, "text", slog.LevelDebug, nil)
+
+// With custom context keys
+customKeys := map[string]any{
+	"requestId": myRequestIDKey,
+	"tenantId":  myTenantIDKey,
+}
+logger := log.New(os.Stdout, "json", slog.LevelInfo, customKeys)
+```
+
+### Logger Parameters
+
+- `w io.Writer`: Output destination (usually `os.Stdout` or `os.Stderr`)
+- `loggerType string`: Format type - "json" or "text"
+- `level slog.Level`: Minimum level - `LevelDebug`, `LevelInfo`, `LevelWarn`, `LevelError`
+- `contextKeys map[string]any`: Additional context keys to extract
+
+## Setting the Default Logger
+
+Replace the default logger used by package functions:
+
+```go
+customLogger := log.New(os.Stdout, "json", slog.LevelInfo, nil)
+log.SetDefault(customLogger)
+
+// Now package functions use the custom logger
+log.Info("using custom logger")
+```
+
+## Log Levels
+
+Control log verbosity with levels:
+
+```go
+import "log/slog"
+
+// Production: Info level (hides Debug)
+log.New(os.Stdout, "json", slog.LevelInfo, nil)
+
+// Development: Debug level (shows everything)
+log.New(os.Stdout, "text", slog.LevelDebug, nil)
+
+// Critical only: Error level
+log.New(os.Stdout, "json", slog.LevelError, nil)
+```
+
+Levels in order:
+- `LevelDebug` - Most verbose, for development
+- `LevelInfo` - General information, default for production
+- `LevelWarn` - Warning conditions
+- `LevelError` - Error conditions
+
+## Output Formats
+
+### Text Format
+
+Human-readable format for development:
+
+```go
+logger := log.New(os.Stdout, "text", slog.LevelInfo, nil)
+log.SetDefault(logger)
+
+log.InfoContext(ctx, "user logged in", "userId", "123")
+// Output: time=2026-02-28T10:30:00Z level=INFO msg="user logged in" userId=123 traceId=abc-def
+```
+
+### JSON Format
+
+Structured format for log aggregation:
+
+```go
+logger := log.New(os.Stdout, "json", slog.LevelInfo, nil)
+log.SetDefault(logger)
+
+log.InfoContext(ctx, "user logged in", "userId", "123")
+// Output: {"time":"2026-02-28T10:30:00Z","level":"INFO","msg":"user logged in","userId":"123","traceId":"abc-def"}
+```
+
+## Integration with Platforma Components
+
+### Queue Workers
+
+Worker IDs are automatically added:
+
+```go
+// In queue/processor.go
+workerCtx := context.WithValue(ctx, log.WorkerIDKey, uuid.NewString())
+
+// In your handler
+func (h *Handler) Handle(ctx context.Context, job Job) {
+	log.InfoContext(ctx, "processing job", "jobId", job.ID)
+	// Output includes: workerId=xxx
+}
+```
+
+### Scheduler Tasks
+
+Trace IDs are automatically added to each run:
+
+```go
+// In scheduler/scheduler.go
+runCtx := context.WithValue(ctx, log.TraceIDKey, uuid.NewString())
+log.InfoContext(runCtx, "scheduler task started")
+
+err := runner.Run(runCtx)
+if err != nil {
+	log.ErrorContext(runCtx, "error in scheduler", "error", err)
+}
+```
+
+### Auth Middleware
+
+User IDs are automatically added:
+
+```go
+// In auth/middleware.go
+ctxWithUserId := context.WithValue(ctx, log.UserIDKey, user.ID)
+
+// In your handler
+func handler(w http.ResponseWriter, r *http.Request) {
+	log.InfoContext(r.Context(), "accessing profile")
+	// Output includes: userId=xxx
+}
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use context variants">
+    Always use `InfoContext`, `ErrorContext`, etc. when you have a context available. This enables automatic enrichment:
+    ```go
+    // Good
+    log.InfoContext(ctx, "user registered", "username", user.Username)
+    
+    // Less useful - missing trace ID, user ID, etc.
+    log.Info("user registered", "username", user.Username)
+    ```
+  </Accordion>
+
+  <Accordion title="Use structured fields">
+    Pass data as key-value pairs, not in the message:
+    ```go
+    // Good - structured and searchable
+    log.ErrorContext(ctx, "database query failed", "error", err, "query", query)
+    
+    // Bad - unstructured, hard to search
+    log.ErrorContext(ctx, fmt.Sprintf("database query failed: %v, query: %s", err, query))
+    ```
+  </Accordion>
+
+  <Accordion title="Choose the right level">
+    - `Debug`: Detailed information for debugging (disabled in production)
+    - `Info`: General informational messages about normal operation
+    - `Warn`: Warning conditions that should be reviewed
+    - `Error`: Error conditions that need attention
+  </Accordion>
+
+  <Accordion title="Use JSON in production">
+    JSON format is better for log aggregation systems like ELK, Datadog, etc.:
+    ```go
+    if os.Getenv("ENV") == "production" {
+        logger := log.New(os.Stdout, "json", slog.LevelInfo, nil)
+        log.SetDefault(logger)
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Complete Example
+
+```go
+package main
+
+import (
+	"context"
+	"log/slog"
+	"os"
+	"github.com/platforma-dev/platforma/log"
+	"github.com/google/uuid"
+)
+
+func main() {
+	// Configure logger
+	logger := log.New(os.Stdout, "json", slog.LevelInfo, nil)
+	log.SetDefault(logger)
+
+	// Create context with trace ID
+	ctx := context.Background()
+	traceID := uuid.NewString()
+	ctx = context.WithValue(ctx, log.TraceIDKey, traceID)
+
+	log.InfoContext(ctx, "application started", "version", "1.0.0")
+
+	// Simulate some work
+	if err := processRequest(ctx); err != nil {
+		log.ErrorContext(ctx, "request failed", "error", err)
+		return
+	}
+
+	log.InfoContext(ctx, "application finished")
+}
+
+func processRequest(ctx context.Context) error {
+	log.InfoContext(ctx, "processing request")
+	
+	// Add user ID to context
+	userID := "user123"
+	ctx = context.WithValue(ctx, log.UserIDKey, userID)
+	
+	log.InfoContext(ctx, "user authenticated")
+	log.DebugContext(ctx, "fetching user data")
+	
+	// Simulate work...
+	
+	log.InfoContext(ctx, "request completed", "duration", "250ms")
+	return nil
+}
+```
+
+Output (JSON format):
+```json
+{"time":"2026-02-28T10:30:00Z","level":"INFO","msg":"application started","version":"1.0.0","traceId":"abc-123"}
+{"time":"2026-02-28T10:30:00Z","level":"INFO","msg":"processing request","traceId":"abc-123"}
+{"time":"2026-02-28T10:30:00Z","level":"INFO","msg":"user authenticated","traceId":"abc-123","userId":"user123"}
+{"time":"2026-02-28T10:30:00Z","level":"INFO","msg":"request completed","duration":"250ms","traceId":"abc-123","userId":"user123"}
+{"time":"2026-02-28T10:30:00Z","level":"INFO","msg":"application finished","traceId":"abc-123"}
+```
